@@ -189,3 +189,40 @@ class TestTranscribeBoth:
         assert len(results["degradation"]) == 1
         assert "engine skipped" in results["degradation"][0]
         assert results["partial_failures"] == []
+
+    def test_partial_chunk_failure_is_recorded(self, tmp_path, monkeypatch):
+        """The per-chunk wrapper records failures into partial_failures before
+        re-raising, so holes in a transcript are visible to the sidecar."""
+        import pytest as _pytest
+        import stt
+        from dual_transcribe import transcribe_both
+
+        fake_audio = tmp_path / "audio.mp3"
+        fake_audio.write_bytes(b"x" * 10)
+        monkeypatch.setattr(stt, "extract_audio", lambda media, out: fake_audio)
+        monkeypatch.setattr(
+            stt, "load_api_key",
+            lambda preferred=None: ("groq", "k") if preferred == "groq" else (None, None),
+        )
+        calls = {"n": 0}
+
+        def flaky_transcribe(backend, key, path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise SystemExit("HTTP 500")
+            return [{"start": 0.0, "end": 1.0, "text": "recovered"}]
+
+        monkeypatch.setattr(stt, "_transcribe_file", flaky_transcribe)
+        real_chunks = stt.transcribe_chunks
+        monkeypatch.setattr(
+            stt, "transcribe_chunks",
+            lambda chunks, fn: real_chunks([(fake_audio, 0.0), (fake_audio, 5.0)], fn),
+        )
+        results = transcribe_both("whatever.mp4", tmp_path / "work")
+        # chunk 2 carries offset 5.0, so shift_segments shifts its 0.0-1.0
+        # segment into 5.0-6.0 source time — the hole is chunk 1 (0.0-5.0).
+        assert results["groq"] == [{"start": 5.0, "end": 6.0, "text": "recovered"}]
+        assert len(results["partial_failures"]) == 1
+        assert "groq: chunk" in results["partial_failures"][0]
+        assert "HTTP 500" in results["partial_failures"][0]
+        assert any("openai" in d for d in results["degradation"])
