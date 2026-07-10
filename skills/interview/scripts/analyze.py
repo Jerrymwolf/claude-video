@@ -107,6 +107,12 @@ def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[s
             if t_end > duration + 1.0 or t_start < 0:
                 dur_txt = "unknown" if duration == float("inf") else f"{duration:.0f}s"
                 errors.append(f"{ref}: timestamps outside media duration ({dur_txt})")
+
+    # Frame extraction keys output dirs by flag id — duplicate ids would
+    # silently cross-contaminate each other's visual evidence.
+    ids = [f.get("id") for f in flags if f.get("id")]
+    for dup in sorted({i for i in ids if ids.count(i) > 1}):
+        errors.append(f"{dup}: duplicate flag id")
     return errors
 
 

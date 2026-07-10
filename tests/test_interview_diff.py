@@ -79,6 +79,17 @@ class TestDiffTranscripts:
         result = diff_transcripts(groq, openai)
         assert result["disagreements"] == []
 
+    def test_empty_vs_nonempty_engine_is_one_big_disagreement(self):
+        """An engine that returned zero segments must not be treated as absent:
+        the CLI diffs [] against the other engine, surfacing the whole
+        transcript as a disagreement to adjudicate instead of silently
+        self-diffing and claiming dual-engine verification."""
+        result = diff_transcripts([], [seg(0.0, 1.0, "hi")])
+        assert len(result["disagreements"]) == 1
+        d = result["disagreements"][0]
+        assert d["groq_text"] == ""
+        assert d["openai_text"] == "hi"
+
     def test_punctuation_only_tokens_do_not_falsely_agree(self):
         groq = [seg(0.0, 2.0, "wait — no")]
         openai = [seg(0.0, 2.0, "wait ... no")]
@@ -193,7 +204,6 @@ class TestTranscribeBoth:
     def test_partial_chunk_failure_is_recorded(self, tmp_path, monkeypatch):
         """The per-chunk wrapper records failures into partial_failures before
         re-raising, so holes in a transcript are visible to the sidecar."""
-        import pytest as _pytest
         import stt
         from dual_transcribe import transcribe_both
 

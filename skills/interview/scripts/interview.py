@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -31,8 +32,12 @@ def _load(path: Path) -> dict | list:
 
 
 def _save(path: Path, data) -> None:
+    # Atomic: several stages rewrite judgment files (e.g. flags.json) in
+    # place; a crash mid-write must never leave a truncated JSON behind.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def cmd_preflight(args) -> int:
@@ -61,7 +66,16 @@ def cmd_discover(args) -> int:
         str(p) for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in MEDIA_EXTS
     )
-    print(json.dumps({"folder": str(folder), "media": files}, indent=2))
+    stems: dict[str, list[str]] = {}
+    for f in files:
+        stems.setdefault(Path(f).stem, []).append(f)
+    duplicates = {s: fs for s, fs in stems.items() if len(fs) > 1}
+    print(json.dumps({"folder": str(folder), "media": files,
+                      "duplicate_stems": duplicates}, indent=2))
+    if duplicates:
+        print(f"WARNING: {len(duplicates)} stem collision(s) — same-stem files share "
+              f"an output dir; process only one per stem or use --out-dir",
+              file=sys.stderr)
     return 0
 
 
@@ -74,10 +88,13 @@ def cmd_transcribe(args) -> int:
             _save(work / f"{backend}.json", results[backend])
 
     groq, openai = results["groq"], results["openai"]
-    if groq and openai:
+    if groq is not None and openai is not None:
+        # An empty result still counts as present: diffing [] against a real
+        # transcript surfaces everything as one disagreement to adjudicate,
+        # instead of silently self-diffing and claiming dual verification.
         diffed = diff_transcripts(groq, openai)
     else:  # degraded single-engine: everything is "agreed", nothing to adjudicate
-        only = groq or openai
+        only = groq if groq is not None else openai
         diffed = diff_transcripts(only, only)
     diffed["degradation"] = results["degradation"]
     diffed["partial_failures"] = results["partial_failures"]
@@ -166,10 +183,22 @@ def cmd_frames(args) -> int:
     meta = framegrab.get_metadata(str(media))
     duration = float(meta.get("duration_seconds") or 0.0)
     for flag in flags:
-        points = burst_timestamps(flag["t_start"], flag["t_end"], duration)
+        # Pull the clamp ceiling in slightly: a seek at exactly t=duration
+        # yields no frame, so every end-of-interview flag would silently
+        # shrink its burst.
+        points = burst_timestamps(
+            flag["t_start"], flag["t_end"], max(duration - 0.1, 0.0)
+        )
         flag_dir = base / "frames" / flag["id"]
         frames, _ = framegrab.extract_at_timestamps(str(media), flag_dir, points)
-        flag["frame_paths"] = [f["path"] for f in frames]
+        # Sidecar paths are relative to the interview dir — research artifacts
+        # must stay portable across machines. Printed lines stay absolute
+        # (Claude Reads those files directly).
+        flag["frame_paths"] = [str(Path(f["path"]).relative_to(base)) for f in frames]
+        missing = len(points) - len(frames)
+        if missing > 0:
+            flag["frames_missing"] = missing
+            print(f"WARNING: {flag['id']}: {missing} frame(s) not extracted")
         print(f"{flag['id']} ({', '.join(flag['marker_types'])}):")
         for f in frames:
             print(f"  t={format_hms(f['timestamp_seconds'])} {f['path']}")
@@ -226,6 +255,9 @@ def cmd_corpus_summary(args) -> int:
     rows = []
     for path in sidecars:
         sc = _load(path)
+        if not isinstance(sc, dict) or "interview" not in sc or "accuracy_claim" not in sc:
+            print(f"WARNING: skipping non-interview sidecar: {path}", file=sys.stderr)
+            continue
         flags = sc.get("flags", [])
         for f in flags:
             for m in f.get("marker_types", []):

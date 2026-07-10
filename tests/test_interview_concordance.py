@@ -167,6 +167,12 @@ class TestValidateFlags:
         errors = validate_flags([self._flag(marker_types=None)], CODEBOOK, 600.0)
         assert errors == ["g0001: missing required field 'marker_types'"]
 
+    def test_duplicate_flag_ids_rejected(self):
+        # Frame dirs are keyed by flag id — duplicates would cross-contaminate
+        # each other's visual evidence.
+        errors = validate_flags([self._flag(), self._flag()], CODEBOOK, 600.0)
+        assert any("duplicate flag id" in e and "g0001" in e for e in errors)
+
 
 class TestBurstTimestamps:
     def test_five_points_centered_on_span_midpoint(self):
@@ -185,3 +191,12 @@ class TestBurstTimestamps:
 
     def test_count_one_yields_clamped_midpoint(self):
         assert burst_timestamps(60.0, 64.0, 600.0, count=1) == [62.0]
+
+    def test_pulled_in_duration_keeps_points_off_media_end(self):
+        # cmd_frames pulls the clamp ceiling in by 0.1s: a seek at exactly
+        # t=duration yields no frame, so end-of-interview bursts must stay
+        # strictly under the true duration.
+        duration = 30.0
+        points = burst_timestamps(29.0, 30.0, max(duration - 0.1, 0.0))
+        assert points
+        assert all(p <= duration - 0.1 for p in points)
