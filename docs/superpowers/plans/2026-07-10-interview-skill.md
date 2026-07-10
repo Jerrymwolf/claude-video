@@ -1420,7 +1420,7 @@ def cmd_frames(args) -> int:
         return 0
     flags = _load(work / "flags.json")
     meta = framegrab.get_metadata(str(media))
-    duration = float(meta.get("duration") or 0.0)
+    duration = float(meta.get("duration_seconds") or 0.0)
     for flag in flags:
         points = burst_timestamps(flag["t_start"], flag["t_end"], duration)
         flag_dir = base / "frames" / flag["id"]
@@ -1445,7 +1445,7 @@ def cmd_render(args) -> int:
 
     try:
         meta = framegrab.get_metadata(str(media))
-        duration = float(meta.get("duration") or 0.0)
+        duration = float(meta.get("duration_seconds") or 0.0)
     except SystemExit:
         duration = segments[-1]["end"] if segments else 0.0
 
