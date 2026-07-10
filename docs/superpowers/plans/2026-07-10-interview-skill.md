@@ -556,6 +556,8 @@ git commit -m "feat(interview): word-level dual-engine diff + adjudication apply
 
 ## Task 3: Turn building, concordance, flag validation, frame bursts
 
+> **Amended by Task 3 review (see the `fix(interview): harden analyze core` commit — the code, not the blocks below, is current):** build_turns iterates segments in start-time order (preserving original indices) and never moves a turn's end backward; compute_concordance records gain an `"invalid"` count (present-but-invalid panel labels no longer silently inflate concordance); validate_flags rejects bool salience and non-list marker_types; burst_timestamps(count=1) returns the clamped midpoint.
+
 **Files:**
 - Create: `tests/test_interview_concordance.py`
 - Create: `skills/interview/scripts/analyze.py`
@@ -1382,6 +1384,8 @@ def cmd_concordance(args) -> int:
     for t in turns:
         t["label"] = scores[t["id"]]["label"]
         t["concordance"] = scores[t["id"]]["concordance"]
+        t["votes"] = scores[t["id"]]["votes"]
+        t["invalid"] = scores[t["id"]]["invalid"]
     _save(work / "diarized.json", turns)
     from collections import Counter
     counts = Counter(t["label"] for t in turns)
