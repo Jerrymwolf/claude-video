@@ -245,7 +245,7 @@ This skill burns tokens primarily on frame reading. Order of magnitude: a 20-fla
 - Does not access any platform account (no login, no cookies, no posting)
 - Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
 - Does not log, cache, or write API keys to stdout, stderr, or output files
-- Does not delete the work directory, `transcript.docx`, or `sidecar.json` — retention is a hard rule (see Retention). The one exception: re-running the frames stage regenerates a flag's frame images in place (stale `cue_*.jpg` for that flag are replaced)
+- Does not delete the work directory, `transcript.docx`, or `sidecar.json` — retention is a hard rule (see Retention). Two replace-in-place exceptions, both covered in Retention: a frames re-run regenerates a flag's `cue_*.jpg` images, and a user-confirmed transcribe re-run replaces the prior engine/diff record
 
 **Bundled scripts:** `scripts/interview.py` (CLI entry point; all subcommands), `scripts/dual_transcribe.py` (dual-engine orchestration, transcript diff, adjudication application), `scripts/analyze.py` (turn building, panel concordance, flag validation, frame-burst timing), `scripts/render.py` (.docx with anchored comments + JSON sidecar), `scripts/stt.py` (Groq/OpenAI Whisper clients), `scripts/framegrab.py` (ffmpeg frame extraction), `scripts/codebook.json` (narrative-gravity codebook v1.0.0). All pure stdlib — no third-party Python packages.
 
