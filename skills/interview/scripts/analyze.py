@@ -7,6 +7,8 @@ from __future__ import annotations
 from collections import Counter
 
 VALID_LABELS = {"INTERVIEWER", "INTERVIEWEE", "OTHER"}
+# Must stay > 0.5: at exactly 0.5 a tie would pass the threshold and the
+# winner would depend on Counter insertion order.
 CONCORDANCE_THRESHOLD = 2 / 3
 
 
@@ -16,11 +18,11 @@ def build_turns(segments: list[dict], gap_seconds: float = 1.0) -> list[dict]:
     A turn is the diarization unit: the panel labels turns, not segments.
     """
     turns: list[dict] = []
-    for idx, seg in enumerate(segments):
+    for idx, seg in sorted(enumerate(segments), key=lambda p: (float(p[1]["start"]), float(p[1]["end"]))):
         if turns and float(seg["start"]) - float(turns[-1]["end"]) <= gap_seconds:
             turn = turns[-1]
             turn["text"] = f"{turn['text']} {seg['text']}".strip()
-            turn["end"] = float(seg["end"])
+            turn["end"] = max(turn["end"], float(seg["end"]))
             turn["segment_indices"].append(idx)
             continue
         turns.append({
@@ -38,17 +40,22 @@ def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
 
     Rules (locked by tests): invalid labels are discarded; fewer than 2 valid
     votes → UNCLEAR; majority below the 2/3 threshold → UNCLEAR. Concordance
-    is majority_votes / valid_votes.
+    is majority_votes / valid_votes. A turn labeled UNCLEAR by threshold keeps
+    the discarded plurality's score — the score describes agreement among
+    valid votes, not agreement that the turn is unclear.
     """
     result: dict = {}
     for turn in turns:
-        votes = [
-            str(p.get(turn["id"], "")).upper()
-            for p in panels
-            if str(p.get(turn["id"], "")).upper() in VALID_LABELS
-        ]
+        present = [str(p[turn["id"]]).upper() for p in panels if turn["id"] in p]
+        votes = [v for v in present if v in VALID_LABELS]
+        invalid = len(present) - len(votes)
         if len(votes) < 2:
-            result[turn["id"]] = {"label": "UNCLEAR", "concordance": 0.0, "votes": len(votes)}
+            result[turn["id"]] = {
+                "label": "UNCLEAR",
+                "concordance": 0.0,
+                "votes": len(votes),
+                "invalid": invalid,
+            }
             continue
         label, count = Counter(votes).most_common(1)[0]
         score = count / len(votes)
@@ -58,6 +65,7 @@ def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
             "label": label,
             "concordance": round(score, 4),
             "votes": len(votes),
+            "invalid": invalid,
         }
     return result
 
@@ -75,6 +83,9 @@ def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[s
             if flag.get(field) in (None, "", []):
                 errors.append(f"{ref}: missing required field '{field}'")
         markers = flag.get("marker_types") or []
+        if not isinstance(markers, list):
+            errors.append(f"{ref}: marker_types must be a list (got {type(markers).__name__})")
+            markers = []
         for m in markers:
             if m not in marker_ids:
                 errors.append(f"{ref}: unknown marker '{m}'")
@@ -85,14 +96,15 @@ def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[s
             elif emotion not in emotions:
                 errors.append(f"{ref}: emotion '{emotion}' not in codebook vocabulary")
         salience = flag.get("salience")
-        if not isinstance(salience, int) or not 1 <= salience <= 5:
+        if not isinstance(salience, int) or isinstance(salience, bool) or not 1 <= salience <= 5:
             errors.append(f"{ref}: salience must be an integer 1-5 (got {salience!r})")
         t_start, t_end = flag.get("t_start"), flag.get("t_end")
         if isinstance(t_start, (int, float)) and isinstance(t_end, (int, float)):
             if t_start > t_end:
                 errors.append(f"{ref}: t_start > t_end")
             if t_end > duration + 1.0 or t_start < 0:
-                errors.append(f"{ref}: timestamps outside media duration ({duration:.0f}s)")
+                dur_txt = "unknown" if duration == float("inf") else f"{duration:.0f}s"
+                errors.append(f"{ref}: timestamps outside media duration ({dur_txt})")
     return errors
 
 
@@ -106,6 +118,6 @@ def burst_timestamps(
     """Five clamped, deduped timestamps centered on the flag-span midpoint."""
     mid = (float(t_start) + float(t_end)) / 2
     half = spread / (count - 1) if count > 1 else 0.0
-    offsets = [(-spread + 2 * half * i) for i in range(count)]
+    offsets = [0.0] if count == 1 else [(-spread + 2 * half * i) for i in range(count)]
     points = [min(max(mid + off, 0.0), float(duration)) for off in offsets]
     return sorted(set(round(p, 2) for p in points))

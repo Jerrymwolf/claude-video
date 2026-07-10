@@ -31,6 +31,32 @@ class TestBuildTurns:
         assert turns[0]["segment_indices"] == [0, 1]
         assert turns[1]["segment_indices"] == [2]
 
+    def test_non_monotonic_segments_are_ordered_not_corrupted(self):
+        segments = [
+            seg(10.0, 12.0, "later words"),
+            seg(0.0, 2.0, "earlier words"),
+            seg(12.5, 13.0, "tail"),
+        ]
+        turns = build_turns(segments, gap_seconds=1.0)
+        assert [t["id"] for t in turns] == ["t0001", "t0002"]
+        assert turns[0]["text"] == "earlier words"
+        assert turns[1]["text"] == "later words tail"
+        assert all(t["end"] >= t["start"] for t in turns)
+        # segment_indices refer to ORIGINAL list positions
+        assert turns[0]["segment_indices"] == [1]
+        assert turns[1]["segment_indices"] == [0, 2]
+
+    def test_overlapping_segments_never_shrink_turn_end(self):
+        segments = [
+            seg(0.0, 5.0, "a"),
+            seg(4.0, 4.5, "b"),    # overlap must not drag end back to 4.5
+            seg(5.2, 6.0, "c"),    # still within gap 1.0 of end=5.0
+        ]
+        turns = build_turns(segments, gap_seconds=1.0)
+        assert len(turns) == 1
+        assert turns[0]["end"] == 6.0
+        assert turns[0]["text"] == "a b c"
+
 
 class TestComputeConcordance:
     def _turns(self):
@@ -40,7 +66,7 @@ class TestComputeConcordance:
     def test_unanimous_panel_yields_full_concordance(self):
         panels = [{"t0001": "INTERVIEWER", "t0002": "INTERVIEWEE"}] * 3
         result = compute_concordance(self._turns(), panels)
-        assert result["t0001"] == {"label": "INTERVIEWER", "concordance": 1.0, "votes": 3}
+        assert result["t0001"] == {"label": "INTERVIEWER", "concordance": 1.0, "votes": 3, "invalid": 0}
         assert result["t0002"]["label"] == "INTERVIEWEE"
 
     def test_two_of_three_majority_meets_threshold(self):
@@ -69,6 +95,17 @@ class TestComputeConcordance:
         result = compute_concordance(self._turns()[:1], panels)
         assert result["t0001"]["label"] == "INTERVIEWER"
         assert result["t0001"]["votes"] == 2
+        assert result["t0001"]["invalid"] == 1
+
+    def test_tie_vote_is_unclear(self):
+        panels = [
+            {"t0001": "INTERVIEWER"},
+            {"t0001": "INTERVIEWER"},
+            {"t0001": "INTERVIEWEE"},
+            {"t0001": "INTERVIEWEE"},
+        ]
+        result = compute_concordance(self._turns()[:1], panels)
+        assert result["t0001"]["label"] == "UNCLEAR"
 
 
 class TestValidateFlags:
@@ -110,6 +147,16 @@ class TestValidateFlags:
         errors = validate_flags([flag], CODEBOOK, 600.0)
         assert any("quote" in e for e in errors)
 
+    def test_boolean_salience_rejected(self):
+        assert validate_flags([self._flag(salience=True)], CODEBOOK, 600.0)
+        assert validate_flags([self._flag(salience=False)], CODEBOOK, 600.0)
+
+    def test_marker_types_string_rejected_without_per_char_noise(self):
+        errors = validate_flags([self._flag(marker_types="emotional_display")], CODEBOOK, 600.0)
+        assert len(errors) == 1
+        assert "must be a list" in errors[0]
+        assert not any("unknown marker" in e for e in errors)
+
 
 class TestBurstTimestamps:
     def test_five_points_centered_on_span_midpoint(self):
@@ -125,3 +172,6 @@ class TestBurstTimestamps:
     def test_clamping_dedupes(self):
         points = burst_timestamps(0.0, 0.0, duration=4.0)
         assert points == sorted(set(points))
+
+    def test_count_one_yields_clamped_midpoint(self):
+        assert burst_timestamps(60.0, 64.0, 600.0, count=1) == [62.0]
