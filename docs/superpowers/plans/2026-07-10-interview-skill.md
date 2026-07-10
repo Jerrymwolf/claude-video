@@ -976,6 +976,18 @@ class TestSidecar:
         )
         assert sc["accuracy_claim"] == "single-engine UNVERIFIED"
 
+    def test_partial_failures_mark_claim_incomplete(self):
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[],
+            segments=[], turns=[], adjudications=[], flags=[],
+            partial_failures=["groq: chunk chunk_002.mp3 failed — HTTP 500"],
+            codebook_version="1.0.0", now="2026-07-10T12:00:00",
+        )
+        assert "INCOMPLETE" in sc["accuracy_claim"]
+        assert sc["partial_failures"] == ["groq: chunk chunk_002.mp3 failed — HTTP 500"]
+
     def test_sidecar_is_json_serializable(self):
         json.dumps(self._sidecar())
 ```
@@ -999,6 +1011,8 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from dual_transcribe import ENGINE_SKIPPED, TRANSCRIPTION_FAILED
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -1166,8 +1180,15 @@ def build_sidecar(
 ) -> dict:
     """Pure assembly of the machine-readable record. `now` injectable for tests."""
     dual = engines.get("groq") and engines.get("openai") and not any(
-        "engine skipped" in d or "transcription failed" in d for d in degradation
+        ENGINE_SKIPPED in d or TRANSCRIPTION_FAILED in d for d in degradation
     )
+    if not dual:
+        claim = "single-engine UNVERIFIED"
+    elif partial_failures:
+        claim = ("dual-engine verified with logged adjudication; "
+                 "INCOMPLETE — transcription gaps recorded")
+    else:
+        claim = "dual-engine verified with logged adjudication"
     return {
         "schema_version": "1.0",
         "interview": {
@@ -1176,10 +1197,7 @@ def build_sidecar(
             "processed_at": now or datetime.now().isoformat(timespec="seconds"),
         },
         "engines": engines,
-        "accuracy_claim": (
-            "dual-engine verified with logged adjudication" if dual
-            else "single-engine UNVERIFIED"
-        ),
+        "accuracy_claim": claim,
         "degradation": degradation,
         "partial_failures": partial_failures,
         "segments": segments,
@@ -1316,11 +1334,13 @@ def cmd_transcribe(args) -> int:
         only = groq or openai
         diffed = diff_transcripts(only, only)
     diffed["degradation"] = results["degradation"]
+    diffed["partial_failures"] = results["partial_failures"]
     _save(work / "diff.json", diffed)
 
     n = len(diffed["disagreements"])
     print(f"WORK_DIR: {work}")
     print(f"DEGRADATION: {results['degradation'] or 'none'}")
+    print(f"PARTIAL_FAILURES: {results['partial_failures'] or 'none'}")
     print(f"DISAGREEMENTS: {n}")
     for d in diffed["disagreements"]:
         print(
@@ -1439,7 +1459,8 @@ def cmd_render(args) -> int:
     sidecar = build_sidecar(
         media=media.name, duration=duration, engines=engines,
         degradation=degradation, segments=segments, turns=turns,
-        adjudications=audit, flags=flags, partial_failures=[],
+        adjudications=audit, flags=flags,
+        partial_failures=list(diffed.get("partial_failures") or []),
         codebook_version=codebook["codebook_version"],
     )
     _save(base / "sidecar.json", sidecar)
@@ -1681,8 +1702,8 @@ retention is this skill's compensating control for being fully automatic).
 ## Failure modes
 - One engine fails/keyless → pipeline continues; artifacts and your report MUST
   carry "single-engine UNVERIFIED".
-- A transcription chunk fails → stt reports it on stderr; note it in your report
-  (it lands in partial_failures via the degradation list).
+- A transcription chunk fails → it is recorded in the sidecar's partial_failures
+  and the accuracy claim is marked INCOMPLETE; note it in your report.
 - validate-flags rejects → fix flags.json per the printed errors; never bypass.
 - Never claim the transcript is "error-free" — the honest claim is printed by render.
 
