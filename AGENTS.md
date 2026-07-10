@@ -8,6 +8,7 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 - `skills/watch/scripts/watch.py` — entry point; orchestrates download → frames → transcript.
 - `skills/watch/scripts/{download,frames,transcribe,whisper,setup,config}.py` — yt-dlp wrapper, ffmpeg frame extraction + auto-fps, caption/Whisper transcription, preflight/installer, shared config.
 - `skills/watch/scripts/build-skill.sh` — builds `dist/watch.skill` for claude.ai upload (dev-only).
+- `skills/interview/` — self-contained interview-ingestion skill (fork addition): dual-engine Whisper diff → Claude adjudication → panel diarization → gravity codebook → .docx + sidecar. Scripts mirror watch conventions; stt.py/framegrab.py are copies of watch's whisper.py/frames.py (keep byte-close for upstream diffing).
 - `hooks/` — Claude Code SessionStart setup-status hook (Claude Code only).
 - `.claude-plugin/` — `plugin.json` + `marketplace.json` (Claude Code plugin + local marketplace).
 - `.codex-plugin/plugin.json` — Codex/agents manifest; `"skills": "./skills/"` points the Agent Skills CLI at the self-contained skill folder.

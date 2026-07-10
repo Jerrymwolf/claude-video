@@ -205,6 +205,21 @@ Other knobs (passed to `scripts/watch.py`):
 - **Long-video accuracy depends on the detail mode.** On the capped modes (`efficient`, default `balanced`) coverage thins out past ~10 minutes — the frame cap spreads across the whole clip, so the script prints a "sparse scan" warning and you're better off re-running focused with `--start`/`--end`. `token-burner` lifts the cap and keeps *every* scene-change frame across the full video, so it stays complete on longer clips at the cost of more image tokens. The 10-minute mark is guidance for the capped modes, not a hard ceiling.
 - **Detail is one dial.** Defaults are balanced: scene-aware frames, 2 fps max, 100-frame cap. Use `--detail efficient` for a fast 50-frame keyframe pass, or `--detail token-burner` for uncapped scene candidates. Set `WATCH_DETAIL` in `~/.config/watch/.env` to change the default.
 
+## /interview (fork addition)
+
+Ingests a social-science interview recording (or a folder of them) and produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags. Audio goes to both Groq (`whisper-large-v3`) and OpenAI (`whisper-1`); the two transcripts are word-level diffed and every disagreement is adjudicated by Claude with a logged rationale — a full audit trail. A 3-analyst panel of independent subagents then labels every turn INTERVIEWER / INTERVIEWEE / OTHER with a concordance score, and INTERVIEWEE turns are coded against a versioned narrative-gravity codebook, pulling targeted frame evidence for video around each flagged moment.
+
+Artifacts land next to the media in `<stem>_interview/`: `transcript.docx` (speaker-labeled transcript, flags as anchored Word comments) and `sidecar.json` (segments, adjudication log, flags with evidence, concordance scores) — persistent research data, not temp files. The work directory is retained as the audit trail, not cleaned up.
+
+```
+/interview ~/Interviews/bei_017.mp4
+/interview ~/Interviews/          # folder batch mode — processes every file, then a corpus summary
+```
+
+Requires both `GROQ_API_KEY` and `OPENAI_API_KEY` for the dual-engine claim; a single key still runs, but every artifact is marked "single-engine UNVERIFIED". The tool never claims the transcript is error-free — the honest claim is "dual-engine verified with logged adjudication" (or a degraded variant), and partial transcription failures mark the record INCOMPLETE.
+
+Construct definitions live in `skills/interview/scripts/codebook.json`. Spec: [github.com/Jerrymwolf/claude-video/issues/1](https://github.com/Jerrymwolf/claude-video/issues/1).
+
 ## Structure
 
 ```
