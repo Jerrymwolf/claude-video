@@ -352,7 +352,6 @@ must adjudicate before the transcript can be finalized.
 from __future__ import annotations
 
 import difflib
-import json
 import re
 import sys
 from pathlib import Path
@@ -539,7 +538,7 @@ def transcribe_both(media_path: str, work_dir: Path) -> dict:
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `python3 -m pytest tests/test_interview_diff.py -q`
-Expected: all PASS (12 tests)
+Expected: all PASS (11 tests)
 
 - [ ] **Step 6: Run the full suite to prove no regression to watch tests**
 
