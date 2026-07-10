@@ -1,0 +1,73 @@
+{
+  "codebook_version": "1.0.0",
+  "construct": "Narrative gravity: a moment in the interviewee's telling that carries unusual analytic weight, marked by one or more observable discourse markers.",
+  "salience_scale": {
+    "1": "Marker present but incidental; does not shape the surrounding narrative.",
+    "2": "Marker colors the passage but the narrative would read the same without it.",
+    "3": "Marker meaningfully shapes how the passage should be interpreted.",
+    "4": "Marker dominates the passage; the moment is a clear analytic anchor.",
+    "5": "Marker defines the interview; a moment the analysis cannot ignore."
+  },
+  "emotions": [
+    "anger", "sadness", "excitement", "fear", "joy", "surprise",
+    "disgust", "shame", "pride", "grief", "anxiety", "frustration",
+    "relief", "contempt"
+  ],
+  "markers": [
+    {
+      "id": "emotional_display",
+      "name": "Emotional display",
+      "definition": "The interviewee's language, delivery (as evident in wording/disfluency), or visible expression indicates a felt emotion tied to the content being narrated.",
+      "indicators": ["explicit emotion words about self", "exclamations", "voice-adjacent text cues (e.g. transcribed laughter, sighs)", "abrupt intensifiers", "visible affect in frames"],
+      "requires_emotion": true
+    },
+    {
+      "id": "repetition",
+      "name": "Repetition",
+      "definition": "The interviewee returns to the same event, phrase, or claim more than once without being re-asked.",
+      "indicators": ["near-verbatim phrase recurrence", "same episode retold", "self-quoting of an earlier answer"],
+      "requires_emotion": false
+    },
+    {
+      "id": "quoted_speech",
+      "name": "Direct quoted speech",
+      "definition": "The interviewee re-enacts dialogue rather than reporting it ('and he said to me, ...').",
+      "indicators": ["reported dialogue framing verbs", "first-person re-enactment", "shift into another's voice"],
+      "requires_emotion": false
+    },
+    {
+      "id": "temporal_shift",
+      "name": "Tense/temporal shift",
+      "definition": "The telling breaks timeline: a jump into historic present, a flash-forward/backward, or collapsed time marking heightened involvement.",
+      "indicators": ["past narrative shifting into present tense", "sudden time jumps mid-episode", "conflation of then and now"],
+      "requires_emotion": false
+    },
+    {
+      "id": "disfluency_cluster",
+      "name": "Disfluency cluster",
+      "definition": "A localized spike in false starts, restarts, fillers, or trailing off, unusual against the speaker's own baseline fluency.",
+      "indicators": ["stacked false starts", "mid-word abandonment", "uncharacteristic filler density", "sentence left hanging"],
+      "requires_emotion": false
+    },
+    {
+      "id": "pause_then_rush",
+      "name": "Pause-then-rush",
+      "definition": "A marked silence followed by unusually rapid or dense speech, visible in the segment timing as a long inter-segment gap followed by high word density.",
+      "indicators": ["long gap between segments mid-answer", "burst of tightly packed speech after a gap"],
+      "requires_emotion": false
+    }
+  ],
+  "flag_schema": {
+    "required": ["id", "marker_types", "quote", "t_start", "t_end", "salience"],
+    "optional": ["emotion", "note", "frame_paths", "visual_evidence"],
+    "rules": [
+      "id: 'g' + 4-digit sequence, e.g. g0001",
+      "marker_types: non-empty list of marker ids from this codebook",
+      "emotion: required iff marker_types includes emotional_display; must be from the emotions list",
+      "quote: verbatim substring of the final transcript (the interviewee's words only)",
+      "t_start/t_end: seconds, within media duration, t_start <= t_end",
+      "salience: integer 1-5 per salience_scale",
+      "visual_evidence: one of corroborates|contradicts|neutral, plus a short note — set only after frames are read"
+    ]
+  }
+}
