@@ -195,6 +195,7 @@ def cmd_frames(args) -> int:
         # must stay portable across machines. Printed lines stay absolute
         # (Claude Reads those files directly).
         flag["frame_paths"] = [str(Path(f["path"]).relative_to(base)) for f in frames]
+        flag.pop("frames_missing", None)  # a healthy re-run must clear stale records
         missing = len(points) - len(frames)
         if missing > 0:
             flag["frames_missing"] = missing

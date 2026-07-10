@@ -59,7 +59,7 @@
   ],
   "flag_schema": {
     "required": ["id", "marker_types", "quote", "t_start", "t_end", "salience"],
-    "optional": ["emotion", "note", "frame_paths", "visual_evidence"],
+    "optional": ["emotion", "note", "frame_paths", "frames_missing", "visual_evidence"],
     "rules": [
       "id: 'g' + 4-digit sequence, e.g. g0001",
       "marker_types: non-empty list of marker ids from this codebook",
