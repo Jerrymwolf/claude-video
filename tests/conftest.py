@@ -11,6 +11,12 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "skills" / "watch" / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+# Interview skill scripts — distinct module names, so both dirs can coexist.
+INTERVIEW_SCRIPTS_DIR = (
+    Path(__file__).resolve().parent.parent / "skills" / "interview" / "scripts"
+)
+sys.path.insert(0, str(INTERVIEW_SCRIPTS_DIR))
+
 # 14 visually distinct fills → 14 abrupt cuts → x264 emits a keyframe per cut.
 COLORS = [
     "red", "green", "blue", "white", "black", "yellow", "cyan",
