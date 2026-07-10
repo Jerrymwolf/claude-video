@@ -160,10 +160,10 @@ Expect roughly 5–20 flags for a 60-minute interview. **Zero flags is a valid o
 Then validate:
 
 ```bash
-python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR --duration <seconds>
+python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR [--duration <seconds>]
 ```
 
-Get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. On errors, fix `flags.json` per each printed line and re-run until it prints `OK`. Validation gates the frame stage — never proceed past a failing validate.
+`--duration` is optional — when omitted it is auto-derived from the final transcript's last segment. Pass it explicitly for exactness: get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. Quotes are checked verbatim against the diarized transcript — a paraphrase fails validation. On errors, fix `flags.json` per each printed line and re-run until it prints `OK`. Validation gates the frame stage — never proceed past a failing validate.
 
 ## Step 6 — Frame evidence (video only)
 

@@ -195,6 +195,36 @@ class TestDocx:
         assert 'w:date="2026-07-10T12:00:00-04:00"' in dated["word/comments.xml"]
         assert "w:date" not in build_docx_parts(TURNS, FLAGS)["word/comments.xml"]
 
+    def test_degraded_claim_and_notes_rendered_in_docx(self):
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0, engines={"groq": "whisper-large-v3"},
+            degradation=["openai: no API key — engine skipped"],
+            segments=[], turns=[], adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+        )
+        parts = build_docx_parts(TURNS, FLAGS, claim=sc["accuracy_claim"],
+                                 notes=sc["degradation"])
+        doc = parts["word/document.xml"]
+        ET.fromstring(doc)  # claim/notes must not break well-formedness
+        assert "single-engine UNVERIFIED" in doc
+        assert "Note: openai: no API key — engine skipped" in doc
+
+    def test_clean_dual_claim_directly_under_title(self):
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=[], adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+        )
+        parts = build_docx_parts(TURNS, FLAGS, claim=sc["accuracy_claim"], notes=[])
+        root = ET.fromstring(parts["word/document.xml"])
+        paras = list(root.iter(f"{W}p"))
+        second = "".join(t.text or "" for t in paras[1].iter(f"{W}t"))
+        assert second == "Accuracy: dual-engine verified with logged adjudication"
+
+    def test_no_claim_means_no_accuracy_paragraph(self):
+        assert "Accuracy:" not in build_docx_parts(TURNS, FLAGS)["word/document.xml"]
+
 
 class TestSidecar:
     def _sidecar(self):

@@ -173,6 +173,20 @@ class TestValidateFlags:
         errors = validate_flags([self._flag(), self._flag()], CODEBOOK, 600.0)
         assert any("duplicate flag id" in e and "g0001" in e for e in errors)
 
+    def test_paraphrased_quote_rejected_against_transcript(self):
+        transcript = "Tell me about it.\nIt was 2019 and I was furious about the layoff."
+        errors = validate_flags([self._flag(quote="I was very angry")], CODEBOOK, 600.0,
+                                transcript_text=transcript)
+        assert any("verbatim substring" in e for e in errors)
+        # the verbatim quote passes untouched
+        assert validate_flags([self._flag(quote="I was furious")], CODEBOOK, 600.0,
+                              transcript_text=transcript) == []
+
+    def test_no_transcript_text_skips_verbatim_check(self):
+        # backward compat: without transcript_text the quote gate is off
+        errors = validate_flags([self._flag(quote="words found nowhere")], CODEBOOK, 600.0)
+        assert not any("verbatim" in e for e in errors)
+
 
 class TestBurstTimestamps:
     def test_five_points_centered_on_span_midpoint(self):

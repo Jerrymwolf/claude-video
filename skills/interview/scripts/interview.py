@@ -98,6 +98,13 @@ def cmd_transcribe(args) -> int:
         diffed = diff_transcripts(only, only)
     diffed["degradation"] = results["degradation"]
     diffed["partial_failures"] = results["partial_failures"]
+    # Engine provenance travels with the diff — file-existence inference at
+    # render time goes stale when a re-run degrades (old groq.json lingers).
+    diffed["engines"] = {
+        backend: model
+        for backend, model in (("groq", "whisper-large-v3"), ("openai", "whisper-1"))
+        if results[backend] is not None
+    }
     _save(work / "diff.json", diffed)
 
     n = len(diffed["disagreements"])
@@ -163,7 +170,15 @@ def cmd_validate_flags(args) -> int:
     flags = _load(work / "flags.json")
     codebook = _load(CODEBOOK_PATH)
     duration = float(args.duration) if args.duration else float("inf")
-    errors = validate_flags(flags, codebook, duration)
+    if not args.duration and (work / "final_transcript.json").exists():
+        segments = _load(work / "final_transcript.json")
+        if segments:  # auto-derive: last segment end ≈ media duration
+            duration = float(segments[-1]["end"])
+    transcript_text = None
+    if (work / "diarized.json").exists():
+        turns = _load(work / "diarized.json")
+        transcript_text = "\n".join(t["text"] for t in turns)
+    errors = validate_flags(flags, codebook, duration, transcript_text=transcript_text)
     if errors:
         print("INVALID FLAGS:")
         for e in errors:
@@ -227,19 +242,29 @@ def cmd_render(args) -> int:
     if media.suffix.lower() in AUDIO_ONLY_EXTS:
         degradation.append("audio-only media: no frame evidence available")
 
-    engines = {}
-    if (work / "groq.json").exists():
-        engines["groq"] = "whisper-large-v3"
-    if (work / "openai.json").exists():
-        engines["openai"] = "whisper-1"
+    engines = dict(diffed.get("engines") or {})
+    if not engines:  # older work dirs predate the engines record in diff.json
+        if (work / "groq.json").exists():
+            engines["groq"] = "whisper-large-v3"
+        if (work / "openai.json").exists():
+            engines["openai"] = "whisper-1"
 
-    docx_path = write_docx(build_docx_parts(turns, flags), base / "transcript.docx")
+    partial = list(diffed.get("partial_failures") or [])
+    # Sidecar first: the docx carries the sidecar's accuracy claim, because
+    # the .docx travels alone in document-based coding workflows.
     sidecar = build_sidecar(
         media=media.name, duration=duration, engines=engines,
         degradation=degradation, segments=segments, turns=turns,
         adjudications=audit, flags=flags,
-        partial_failures=list(diffed.get("partial_failures") or []),
+        partial_failures=partial,
         codebook_version=codebook["codebook_version"],
+    )
+    notes = degradation + (
+        ["transcription gaps: " + "; ".join(partial)] if partial else []
+    )
+    docx_path = write_docx(
+        build_docx_parts(turns, flags, claim=sidecar["accuracy_claim"], notes=notes),
+        base / "transcript.docx",
     )
     _save(base / "sidecar.json", sidecar)
     print(f"DOCX: {docx_path}")

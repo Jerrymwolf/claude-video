@@ -14,3 +14,7 @@ htmlcov/
 
 # local Claude Code settings
 .claude/settings.local.json
+
+# interview skill outputs (running the skill on media inside the repo)
+*_interview/
+corpus_summary.json

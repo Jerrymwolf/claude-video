@@ -118,9 +118,18 @@ def _paragraph_for_turn(turn: dict, turn_flags: list[tuple[int, dict]]) -> str:
 
 
 def build_docx_parts(
-    turns: list[dict], flags: list[dict], now: str | None = None
+    turns: list[dict],
+    flags: list[dict],
+    now: str | None = None,
+    claim: str | None = None,
+    notes: list[str] | None = None,
 ) -> dict[str, str]:
     """Pure: labeled turns + validated flags → {zip_name: xml_string}.
+
+    When `claim` is set, an "Accuracy: <claim>" paragraph (plus one "Note: ..."
+    paragraph per entry in `notes`) renders directly under the title — the
+    .docx travels alone in document-based coding workflows, so the accuracy
+    claim must live in both artifacts, not just the sidecar.
 
     With no turns, flags still emit comment entries but anchor nowhere
     (orphaned in comments.xml) — callers should not render flag-bearing
@@ -155,6 +164,12 @@ def build_docx_parts(
     paragraphs = [
         "<w:p>" + _run("Interview Transcript", bold=True) + "</w:p>",
     ]
+    if claim:
+        paragraphs.append(
+            "<w:p>" + _run("Accuracy: ", bold=True) + _run(claim) + "</w:p>"
+        )
+        for note in notes or []:
+            paragraphs.append("<w:p>" + _run(f"Note: {note}") + "</w:p>")
     for turn in turns:
         paragraphs.append(_paragraph_for_turn(turn, flag_to_turn.get(turn["id"], [])))
 

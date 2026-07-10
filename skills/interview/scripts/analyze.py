@@ -70,8 +70,17 @@ def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
     return result
 
 
-def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[str]:
-    """Return a list of human-readable schema violations (empty = valid)."""
+def validate_flags(
+    flags: list[dict],
+    codebook: dict,
+    duration: float,
+    transcript_text: str | None = None,
+) -> list[str]:
+    """Return a list of human-readable schema violations (empty = valid).
+
+    When `transcript_text` is provided, every quote must be a verbatim
+    substring of it — paraphrased quotes are research-record corruption.
+    """
     errors: list[str] = []
     marker_ids = {m["id"] for m in codebook["markers"]}
     emotions = set(codebook["emotions"])
@@ -82,6 +91,9 @@ def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[s
         for field in required:
             if flag.get(field) in (None, "", []):
                 errors.append(f"{ref}: missing required field '{field}'")
+        quote = flag.get("quote")
+        if transcript_text is not None and quote and quote not in transcript_text:
+            errors.append(f"{ref}: quote is not a verbatim substring of the transcript")
         markers = flag.get("marker_types")
         if markers in (None, "", []):
             markers = []  # already reported missing by the required-field check
