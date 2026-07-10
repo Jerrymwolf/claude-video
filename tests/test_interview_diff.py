@@ -73,6 +73,23 @@ class TestDiffTranscripts:
         assert 10.0 <= d["t_start"] <= 12.0
         assert d["t_start"] <= d["t_end"]
 
+    def test_curly_vs_straight_apostrophes_are_agreements(self):
+        groq = [seg(0.0, 2.0, "I don’t know")]  # curly apostrophe (U+2019)
+        openai = [seg(0.0, 2.0, "I don't know")]  # straight apostrophe
+        result = diff_transcripts(groq, openai)
+        assert result["disagreements"] == []
+
+    def test_punctuation_only_tokens_do_not_falsely_agree(self):
+        groq = [seg(0.0, 2.0, "wait — no")]
+        openai = [seg(0.0, 2.0, "wait ... no")]
+        result = diff_transcripts(groq, openai)
+        assert len(result["disagreements"]) == 1
+        d = result["disagreements"][0]
+        assert d["groq_text"] == "—"
+        assert d["openai_text"] == "..."
+        agreed = [w["raw"] for w in result["stream"] if w["kind"] == "word"]
+        assert agreed == ["wait", "no"]
+
 
 class TestApplyAdjudications:
     def _diffed(self):
@@ -84,6 +101,15 @@ class TestApplyAdjudications:
         r = self._diffed()
         with pytest.raises(ValueError, match="d0001"):
             apply_adjudications(r["stream"], r["disagreements"], {})
+
+    def test_unknown_decision_id_raises(self):
+        r = self._diffed()
+        decisions = {
+            "d0001": {"text": "ecstatic", "rationale": "context"},
+            "d0099": {"text": "ghost", "rationale": "no such disagreement"},
+        }
+        with pytest.raises(ValueError, match="d0099"):
+            apply_adjudications(r["stream"], r["disagreements"], decisions)
 
     def test_decision_text_is_spliced_into_final_segments(self):
         r = self._diffed()
@@ -116,3 +142,50 @@ class TestApplyAdjudications:
         assert segments[0]["text"] == "first segment here"
         assert segments[1]["text"] == "second segment there"
         assert audit == []
+
+    def test_adjudication_can_delete_an_entire_segment(self):
+        groq = [seg(0.0, 1.0, "only word"), seg(2.0, 4.0, "keep this")]
+        openai = [seg(2.0, 4.0, "keep this")]
+        r = diff_transcripts(groq, openai)
+        assert len(r["disagreements"]) == 1
+        d = r["disagreements"][0]
+        assert d["groq_text"] == "only word"
+        assert d["openai_text"] == ""
+        decisions = {d["id"]: {"text": "", "rationale": "hallucinated; openai right"}}
+        segments, audit = apply_adjudications(r["stream"], r["disagreements"], decisions)
+        assert len(segments) == 1
+        assert segments[0]["text"] == "keep this"
+        assert segments[0]["start"] == 2.0
+        assert len(audit) == 1
+        assert audit[0]["chosen_text"] == ""
+
+
+class TestTranscribeBoth:
+    def test_missing_engine_key_records_degradation(self, monkeypatch, tmp_path):
+        import stt
+
+        import dual_transcribe
+
+        def fake_extract_audio(video_path, out_path):
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"fake-mp3-bytes")
+            return out_path
+
+        def fake_load_api_key(preferred=None):
+            if preferred == "groq":
+                return ("groq", "k")
+            return (None, None)
+
+        def fake_transcribe_chunks(chunks, transcribe_one):
+            return [{"start": 0.0, "end": 1.0, "text": "hi"}]
+
+        monkeypatch.setattr(stt, "extract_audio", fake_extract_audio)
+        monkeypatch.setattr(stt, "load_api_key", fake_load_api_key)
+        monkeypatch.setattr(stt, "transcribe_chunks", fake_transcribe_chunks)
+
+        results = dual_transcribe.transcribe_both("fake.mp4", tmp_path / "work")
+        assert results["groq"] == [{"start": 0.0, "end": 1.0, "text": "hi"}]
+        assert results["openai"] is None
+        assert len(results["degradation"]) == 1
+        assert "engine skipped" in results["degradation"][0]
+        assert results["partial_failures"] == []

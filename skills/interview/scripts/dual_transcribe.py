@@ -22,9 +22,20 @@ import stt
 WORD_RE = re.compile(r"\S+")
 NORM_RE = re.compile(r"[^\w']+", re.UNICODE)
 
+# Degradation-record markers. A later task's sidecar builder imports these
+# instead of grepping magic strings out of the degradation messages.
+ENGINE_SKIPPED = "engine skipped"
+TRANSCRIPTION_FAILED = "transcription failed"
+
 
 def normalize_token(raw: str) -> str:
-    """Lowercase and strip punctuation (keeping intra-word apostrophes)."""
+    """Lowercase and strip punctuation (keeping intra-word apostrophes).
+
+    Curly apostrophes (U+2019, U+02BC) are folded to straight ones first —
+    engines disagree on apostrophe style, and without folding every
+    contraction would become a spurious disagreement.
+    """
+    raw = raw.replace("’", "'").replace("ʼ", "'")
     return NORM_RE.sub("", raw).lower()
 
 
@@ -45,7 +56,10 @@ def words_with_times(segments: list[dict]) -> list[dict]:
         for i, raw in enumerate(tokens):
             words.append({
                 "raw": raw,
-                "key": normalize_token(raw),
+                # Punctuation-only tokens ("—", "...") normalize to "" and
+                # would spuriously match each other across streams; fall
+                # back to the raw form so they only match themselves.
+                "key": normalize_token(raw) or raw.lower(),
                 "t": round(float(seg["start"]) + i * step, 2),
                 "seg": seg_idx,
             })
@@ -83,7 +97,9 @@ def diff_transcripts(
         anchor = g_words or o_words
         if anchor:
             t_start, t_end = anchor[0]["t"], anchor[-1]["t"]
-        else:  # degenerate; anchor to the previous kept word
+        else:
+            # unreachable by construction: a non-equal opcode always has
+            # words on at least one side
             t_start = t_end = a[i1 - 1]["t"] if i1 > 0 else 0.0
         seg = g_words[0]["seg"] if g_words else (a[i1 - 1]["seg"] if i1 > 0 else 0)
 
@@ -116,6 +132,11 @@ def apply_adjudications(
     missing = sorted(d_id for d_id in by_id if d_id not in decisions)
     if missing:
         raise ValueError(f"missing adjudications for: {', '.join(missing)}")
+    unknown = sorted(set(decisions) - set(by_id))
+    if unknown:
+        raise ValueError(
+            f"decisions reference unknown disagreement ids: {', '.join(unknown)}"
+        )
 
     words: list[dict] = []
     audit: list[dict] = []
@@ -173,20 +194,38 @@ def transcribe_both(media_path: str, work_dir: Path) -> dict:
     else:
         chunks = [(audio_path, 0.0)]
 
-    results: dict = {"groq": None, "openai": None, "degradation": []}
+    results: dict = {
+        "groq": None,
+        "openai": None,
+        "degradation": [],
+        "partial_failures": [],
+    }
+
+    def make_transcriber(backend: str, api_key: str):
+        # stt.transcribe_chunks skips a failed chunk after logging to stderr
+        # only; record the hole here so the sidecar never claims "dual-engine
+        # verified" over a holed transcript.
+        def transcribe_one(path: Path) -> list[dict]:
+            try:
+                return stt._transcribe_file(backend, api_key, path)
+            except SystemExit as exc:
+                results["partial_failures"].append(
+                    f"{backend}: chunk {path.name} failed — {exc}"
+                )
+                raise
+        return transcribe_one
+
     for backend in ("groq", "openai"):
-        found, api_key = stt.load_api_key(preferred=backend)
+        _, api_key = stt.load_api_key(preferred=backend)
         if not api_key:
             results["degradation"].append(
-                f"{backend}: no API key — engine skipped; dual-engine verification does not hold"
+                f"{backend}: no API key — {ENGINE_SKIPPED}; dual-engine verification does not hold"
             )
             continue
         try:
-            segments = stt.transcribe_chunks(
-                chunks, lambda p, b=backend, k=api_key: stt._transcribe_file(b, k, p)
-            )
+            segments = stt.transcribe_chunks(chunks, make_transcriber(backend, api_key))
         except SystemExit as exc:
-            results["degradation"].append(f"{backend}: transcription failed — {exc}")
+            results["degradation"].append(f"{backend}: {TRANSCRIPTION_FAILED} — {exc}")
             continue
         results[backend] = segments
         print(f"[interview] {backend}: {len(segments)} segments", file=sys.stderr)
