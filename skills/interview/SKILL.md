@@ -57,6 +57,8 @@ Keys are read from the environment first, then `~/.config/watch/.env`, then `./.
 
 Separate the media source from any notes the user attached (`/interview ~/beis/p017.mp4 second session, same participant` → source = the file, notes = context to keep in mind while coding).
 
+**Always pass the media file's ABSOLUTE path to every subcommand** — resolve it once here and reuse it verbatim through Steps 2–7. Relative paths make the printed frame paths relative and Step 6's `Read` calls cwd-dependent.
+
 - **Single file** → proceed to Step 2.
 - **Folder** → run discovery first:
 
@@ -125,7 +127,7 @@ Dispatch THREE independent subagents via the Agent tool, **all in one message** 
 
 > You are analyst {N} of an independent diarization panel. Below is a numbered, timestamped transcript of a two-party research interview. Label EVERY turn: INTERVIEWER (asks, probes, manages the protocol), INTERVIEWEE (narrates, answers), or OTHER (third voice, interruption, unattributable crosstalk). Judge from discourse role, not word count. Return ONLY a JSON object: {"t0001": "INTERVIEWER", ...} — every turn id, no commentary.
 
-The only valid labels are `INTERVIEWER`, `INTERVIEWEE`, and `OTHER` — any other string is counted as an invalid vote and lowers that turn's measured reliability. Write each agent's output **verbatim** to `WORK_DIR/panel_1.json`, `panel_2.json`, `panel_3.json` (do not fix, normalize, or fill in their answers — a malformed vote is data too). Then:
+The only valid labels are `INTERVIEWER`, `INTERVIEWEE`, and `OTHER` — any other string is discarded from the valid-vote count and recorded in the turn's `invalid` field; sloppy labels erode the audit record and can force `UNCLEAR` when fewer than 2 valid votes remain. Write each agent's output **verbatim** to `WORK_DIR/panel_1.json`, `panel_2.json`, `panel_3.json` (do not fix, normalize, or fill in their answers — a malformed vote is data too). Then:
 
 ```bash
 python3 "${SKILL_DIR}/scripts/interview.py" concordance --work WORK_DIR
@@ -159,7 +161,7 @@ Get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0
 python3 "${SKILL_DIR}/scripts/interview.py" frames "<media>"
 ```
 
-For audio-only media this prints a skip note and exits 0 — go straight to Step 7. For video, it extracts a ~5-frame burst around each flag's midpoint into `frames/<flag_id>/`, prints the absolute path of every frame, and writes the relative paths (plus a `frames_missing` count for any frames that could not be extracted) back into `flags.json`.
+For audio-only media this prints a skip note and exits 0 — go straight to Step 7. For video, it extracts a ~5-frame burst around each flag's midpoint into `frames/<flag_id>/`, prints the path of every frame (absolute, given the absolute-media rule in Step 1), and writes the relative paths (plus a `frames_missing` count for any frames that could not be extracted) back into `flags.json`.
 
 `Read` ALL printed frame paths **in one message** (parallel tool calls) so you see each flag's burst together. Then, for each flag, set `"visual_evidence"` in `WORK_DIR/flags.json` to one of:
 
@@ -197,7 +199,7 @@ Batch mode: one line per interview (media, claim, flag count), then the corpus s
 
 ## Retention
 
-**NEVER delete the work directory or the frames directory.** They are the audit trail: every engine reading, every adjudication decision with rationale, every panel vote, and every evidence frame must remain inspectable after the fact. Evidence retention is this skill's compensating control for being fully automatic — a human reviewer can re-derive or challenge any judgment from what's on disk. This is the opposite of `/watch`'s cleanup step: these artifacts persist next to the media by design.
+**NEVER delete the work directory or the frames directory.** They are the audit trail: every engine reading, every adjudication decision with rationale, every panel vote, and every evidence frame must remain inspectable after the fact. One caveat: re-running the frames stage regenerates each flag's frame images in place — the previous `cue_*.jpg` for that flag are replaced, so a frames re-run overwrites that flag's prior visual-evidence images. Evidence retention is this skill's compensating control for being fully automatic — a human reviewer can re-derive or challenge any judgment from what's on disk. This is the opposite of `/watch`'s cleanup step: these artifacts persist next to the media by design.
 
 ## Failure modes
 
@@ -223,7 +225,7 @@ Batch mode: one line per interview (media, claim, flag count), then the corpus s
 - Does not access any platform account (no login, no cookies, no posting)
 - Does not share API keys between providers (Groq key only goes to `api.groq.com`, OpenAI key only goes to `api.openai.com`)
 - Does not log, cache, or write API keys to stdout, stderr, or output files
-- Does not delete anything — retention of the work directory and frames is a hard rule (see Retention)
+- Does not delete the work directory, `transcript.docx`, or `sidecar.json` — retention is a hard rule (see Retention). The one exception: re-running the frames stage regenerates a flag's frame images in place (stale `cue_*.jpg` for that flag are replaced)
 
 **Bundled scripts:** `scripts/interview.py` (CLI entry point; all subcommands), `scripts/dual_transcribe.py` (dual-engine orchestration, transcript diff, adjudication application), `scripts/analyze.py` (turn building, panel concordance, flag validation, frame-burst timing), `scripts/render.py` (.docx with anchored comments + JSON sidecar), `scripts/stt.py` (Groq/OpenAI Whisper clients), `scripts/framegrab.py` (ffmpeg frame extraction), `scripts/codebook.json` (narrative-gravity codebook v1.0.0). All pure stdlib — no third-party Python packages.
 
