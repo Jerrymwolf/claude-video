@@ -66,17 +66,19 @@ Separate the media source from any notes the user attached (`/interview ~/beis/p
   python3 "${SKILL_DIR}/scripts/interview.py" discover "<folder>"
   ```
 
-  It prints the media list and a `duplicate_stems` map. Same-stem files (e.g. `p017.mp4` and `p017.wav`) share an output directory and would overwrite each other — when `duplicate_stems` is non-empty, ask the user which file to process per stem (or process only one per stem) before starting. Then run every chosen file **sequentially** through Steps 2–8. Batch mode REQUIRES the default output locations (no `--out-dir`): the corpus summary only finds sidecars at `<folder>/*_interview/sidecar.json`. After the last interview:
+  It prints the media list and a `duplicate_stems` map. Same-stem files (e.g. `p017.mp4` and `p017.wav`) share an output directory and would overwrite each other — when `duplicate_stems` is non-empty, ask the user which file to process per stem (or process only one per stem) before starting. Then run every chosen file **sequentially, in discover's printed order,** through Steps 2–8. If a file hard-fails (both engines fail, unreadable media), continue the batch and record the failure; `corpus-summary` only counts completed sidecars, so your final report MUST name every failed file explicitly — a failed interview must never silently vanish from the corpus count. Batch mode REQUIRES the default output locations (no `--out-dir`): the corpus summary only finds sidecars at `<folder>/*_interview/sidecar.json`. After the last interview:
 
   ```bash
   python3 "${SKILL_DIR}/scripts/interview.py" corpus-summary "<folder>"
   ```
 
   Report the printed summary (interview count, per-interview flag counts and claims, corpus-wide flags by marker and emotion) alongside the per-interview one-liners.
-- **URL** → allowed only for non-sensitive material (public talks, published oral histories — not confidential participant recordings; those must stay local). Download to a local file first with `yt-dlp -o "<dir>/%(title)s.%(ext)s" "<url>"`, then treat it as a file.
+- **URL** → allowed only for non-sensitive material (public talks, published oral histories — not confidential participant recordings; those must stay local). Download INTO the directory where the artifacts should live (ask the user if unclear — the interview dir is created next to the media file): `yt-dlp -o "<dir>/%(title)s.%(ext)s" "<url>"`, then treat it as a file. If `yt-dlp` is not installed: `brew install yt-dlp` (macOS) / `pipx install yt-dlp` (Linux).
 - **Audio-only file** (`.m4a`, `.wav`, `.mp3`, `.aac`, `.flac`) → same pipeline; the frame stage skips itself automatically and the sidecar records that no visual evidence was available.
 
 All artifacts land next to the media: `<media_dir>/<stem>_interview/{transcript.docx, sidecar.json, frames/, work/}`.
+
+If `<stem>_interview/` already exists, do NOT re-run transcription by default — answer from the existing artifacts, or confirm with the user first: re-running transcribe replaces the prior groq/openai/diff record (the audit trail's engine readings) and re-spends API money. Downstream stages (finalize onward) can be re-run freely from the existing work files.
 
 ## Step 2 — Dual transcription
 
@@ -93,7 +95,7 @@ This extracts audio and uploads it to BOTH Groq (`whisper-large-v3`) and OpenAI 
 
 If `N` is 0 the script says so — write an empty `{}` as `adjudications.json` in Step 3 and move on.
 
-`--out-dir DIR` overrides the default output location for a single interview (never use it in batch mode).
+`--out-dir DIR` overrides the default output location for a single interview (never use it in batch mode). If you use it, pass the SAME `--out-dir` to transcribe, frames, AND render — each recomputes the base directory from the media path.
 
 ## Step 3 — Adjudicate (judgment job 1)
 
@@ -127,7 +129,7 @@ Dispatch THREE independent subagents via the Agent tool, **all in one message** 
 
 > You are analyst {N} of an independent diarization panel. Below is a numbered, timestamped transcript of a two-party research interview. Label EVERY turn: INTERVIEWER (asks, probes, manages the protocol), INTERVIEWEE (narrates, answers), or OTHER (third voice, interruption, unattributable crosstalk). Judge from discourse role, not word count. Return ONLY a JSON object: {"t0001": "INTERVIEWER", ...} — every turn id, no commentary.
 
-The only valid labels are `INTERVIEWER`, `INTERVIEWEE`, and `OTHER` — any other string is discarded from the valid-vote count and recorded in the turn's `invalid` field; sloppy labels erode the audit record and can force `UNCLEAR` when fewer than 2 valid votes remain. Write each agent's output **verbatim** to `WORK_DIR/panel_1.json`, `panel_2.json`, `panel_3.json` (do not fix, normalize, or fill in their answers — a malformed vote is data too). Then:
+The only valid labels are `INTERVIEWER`, `INTERVIEWEE`, and `OTHER` — any other string is discarded from the valid-vote count and recorded in the turn's `invalid` field; sloppy labels erode the audit record and can force `UNCLEAR` when fewer than 2 valid votes remain. Write each agent's output **verbatim** to `WORK_DIR/panel_1.json`, `panel_2.json`, `panel_3.json` (do not fix, normalize, or fill in their answers — a malformed vote is data too). Each `panel_N.json` must itself be a parseable JSON object: if an analyst wraps the object in prose or code fences, save the JSON OBJECT it returned (its labels verbatim — never your corrections to them); if an analyst returns nothing usable, re-dispatch that one analyst once. If only 2 of 3 panels are usable, proceed — concordance accepts ≥2 — and note the lost analyst in your report. Then:
 
 ```bash
 python3 "${SKILL_DIR}/scripts/interview.py" concordance --work WORK_DIR
@@ -147,7 +149,15 @@ Read `"${SKILL_DIR}/scripts/codebook.json"` **fresh each run** (never from memor
 - `emotion`: required **iff** `marker_types` includes `emotional_display`; must come from the codebook's emotions list.
 - `note`: optional, brief.
 
-Expect roughly 5–20 flags for a 60-minute interview. **Zero flags is a valid outcome** for a flat interview — do not invent gravity to have something to show. Write the array to `WORK_DIR/flags.json`, then validate:
+Expect roughly 5–20 flags for a 60-minute interview. **Zero flags is a valid outcome** for a flat interview — do not invent gravity to have something to show. Write the flags to `WORK_DIR/flags.json` as a **top-level array** (not `{"flags": [...]}`):
+
+```json
+[
+  {"id": "g0001", "marker_types": ["quoted_speech"], "quote": "and he said to me, you're done", "t_start": 754.2, "t_end": 761.0, "salience": 3}
+]
+```
+
+Then validate:
 
 ```bash
 python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR --duration <seconds>
@@ -163,7 +173,7 @@ python3 "${SKILL_DIR}/scripts/interview.py" frames "<media>"
 
 For audio-only media this prints a skip note and exits 0 — go straight to Step 7. For video, it extracts a ~5-frame burst around each flag's midpoint into `frames/<flag_id>/`, prints the path of every frame (absolute, given the absolute-media rule in Step 1), and writes the relative paths (plus a `frames_missing` count for any frames that could not be extracted) back into `flags.json`.
 
-`Read` ALL printed frame paths **in one message** (parallel tool calls) so you see each flag's burst together. Then, for each flag, set `"visual_evidence"` in `WORK_DIR/flags.json` to one of:
+`Read` every printed frame (batch per flag when there are many — see Token efficiency), using parallel tool calls so you see each flag's burst together. Then, for each flag, set `"visual_evidence"` in `WORK_DIR/flags.json` to one of:
 
 - `"corroborates — <note>"` — visible affect/behavior matches the flag (e.g. tearing up during a grief-marked passage).
 - `"contradicts — <note>"` — the visuals cut against the flag (e.g. flat affect during claimed emotional display).
@@ -199,16 +209,26 @@ Batch mode: one line per interview (media, claim, flag count), then the corpus s
 
 ## Retention
 
-**NEVER delete the work directory or the frames directory.** They are the audit trail: every engine reading, every adjudication decision with rationale, every panel vote, and every evidence frame must remain inspectable after the fact. One caveat: re-running the frames stage regenerates each flag's frame images in place — the previous `cue_*.jpg` for that flag are replaced, so a frames re-run overwrites that flag's prior visual-evidence images. Evidence retention is this skill's compensating control for being fully automatic — a human reviewer can re-derive or challenge any judgment from what's on disk. This is the opposite of `/watch`'s cleanup step: these artifacts persist next to the media by design.
+**NEVER delete the work directory or the frames directory.** They are the audit trail: every engine reading, every adjudication decision with rationale, every panel vote, and every evidence frame must remain inspectable after the fact. One caveat: re-running the frames stage regenerates each flag's frame images in place — the previous `cue_*.jpg` for that flag are replaced, so a frames re-run overwrites that flag's prior visual-evidence images. A transcribe re-run likewise replaces the prior groq/openai/diff record — which is why Step 1's re-run policy requires user confirmation first. Evidence retention is this skill's compensating control for being fully automatic — a human reviewer can re-derive or challenge any judgment from what's on disk. This is the opposite of `/watch`'s cleanup step: these artifacts persist next to the media by design.
 
 ## Failure modes
 
 - **One engine keyless or failed** → the pipeline continues single-engine (the diff self-compares, so there is nothing to adjudicate). The degradation is recorded in the sidecar and the claim becomes `single-engine UNVERIFIED`. Your report MUST carry that phrase.
 - **Some transcription chunks failed** → recorded in the sidecar's `partial_failures`; the claim gains `INCOMPLETE — transcription gaps recorded`. Note the gaps in your report.
 - **finalize raises on adjudications** → your `adjudications.json` has missing or unknown ids. Fix the file to cover exactly the printed disagreement ids; do not edit `diff.json`.
+- **A panel file won't parse** → concordance dies on malformed JSON. Save the JSON object from that analyst's reply (labels verbatim); if nothing usable, re-dispatch that one analyst once, or proceed with the 2 usable panels and note the lost analyst in your report.
+- **A batch file hard-fails** (both engines fail, unreadable media) → continue the batch and record the failure; name every failed file explicitly in your final report — `corpus-summary` only counts completed sidecars.
 - **validate-flags rejects** → fix `flags.json` per the printed errors and re-run. Never bypass validation.
 - **Frames missing for a flag** → `frames_missing` is recorded on the flag; assess visual evidence from the frames that did extract, or mark it `neutral` if none did.
 - **Never claim the transcript is "error-free"** — no ASR pipeline is. The honest claim is whatever render prints, and that is what you report.
+
+## Token efficiency
+
+This skill burns tokens primarily on frame reading. Order of magnitude: a 20-flag video interview yields up to ~100 frames, roughly 200 image tokens each at 512px; the transcript stages are cheap by comparison.
+
+- **More than ~10 flags** → do not read every frame in one message. Read frames in per-flag batches, ordered by salience (highest first), and record each flag's `visual_evidence` before moving to the next batch.
+- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-flags and frames need `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json`.
+- **If context runs low mid-batch** → finish the interview in progress through render, report which files remain unprocessed, and tell the user to re-invoke `/interview` on the remainder.
 
 ## Security & Permissions
 
