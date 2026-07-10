@@ -5,6 +5,8 @@ same approach as hand-rolled multipart in stt.py: the format is small and
 predictable, so we write it directly rather than pulling python-docx."""
 from __future__ import annotations
 
+import copy
+import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -33,8 +35,16 @@ DOC_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </Relationships>"""
 
 
+_XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_text(text: str) -> str:
+    """Escape for XML and strip characters XML 1.0 cannot represent at all."""
+    return escape(_XML_ILLEGAL_RE.sub("", text))
+
+
 def format_hms(seconds: float) -> str:
-    s = int(seconds)
+    s = max(0, int(seconds or 0))
     if s >= 3600:
         return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     return f"{s // 60:02d}:{s % 60:02d}"
@@ -42,7 +52,7 @@ def format_hms(seconds: float) -> str:
 
 def _run(text: str, bold: bool = False) -> str:
     props = "<w:rPr><w:b/></w:rPr>" if bold else ""
-    return f'<w:r>{props}<w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+    return f'<w:r>{props}<w:t xml:space="preserve">{_xml_text(text)}</w:t></w:r>'
 
 
 def _flag_comment_text(flag: dict) -> str:
@@ -50,7 +60,8 @@ def _flag_comment_text(flag: dict) -> str:
     bits = [f"GRAVITY [{markers}]"]
     if flag.get("emotion"):
         bits.append(f"emotion: {flag['emotion']}")
-    bits.append(f"salience {flag.get('salience')}/5")
+    if flag.get("salience") is not None:
+        bits.append(f"salience {flag['salience']}/5")
     bits.append(f"t={format_hms(flag.get('t_start', 0))}-{format_hms(flag.get('t_end', 0))}")
     if flag.get("note"):
         bits.append(flag["note"])
@@ -106,10 +117,18 @@ def _paragraph_for_turn(turn: dict, turn_flags: list[tuple[int, dict]]) -> str:
     return f"<w:p>{header}{''.join(body_parts)}</w:p>"
 
 
-def build_docx_parts(turns: list[dict], flags: list[dict]) -> dict[str, str]:
-    """Pure: labeled turns + validated flags → {zip_name: xml_string}."""
+def build_docx_parts(
+    turns: list[dict], flags: list[dict], now: str | None = None
+) -> dict[str, str]:
+    """Pure: labeled turns + validated flags → {zip_name: xml_string}.
+
+    With no turns, flags still emit comment entries but anchor nowhere
+    (orphaned in comments.xml) — callers should not render flag-bearing
+    documents with empty turns.
+    """
     flag_to_turn: dict[str, list[tuple[int, dict]]] = {}
     comments_xml_items: list[str] = []
+    date_attr = f' w:date="{now}"' if now else ""
     for cid, flag in enumerate(flags):
         home = None
         for turn in turns:
@@ -117,8 +136,11 @@ def build_docx_parts(turns: list[dict], flags: list[dict]) -> dict[str, str]:
             if in_time and (flag.get("quote") or "") in turn["text"]:
                 home = turn
                 break
-        if home is None:  # fall back: best time overlap, else last turn
+        if home is None:  # fall back: strict time containment, then ±2s slop
             home = next(
+                (t for t in turns if t["start"] <= flag.get("t_start", 0) <= t["end"]),
+                None,
+            ) or next(
                 (t for t in turns
                  if t["start"] - 2.0 <= flag.get("t_start", 0) <= t["end"] + 2.0),
                 turns[-1] if turns else None,
@@ -126,7 +148,7 @@ def build_docx_parts(turns: list[dict], flags: list[dict]) -> dict[str, str]:
         if home is not None:
             flag_to_turn.setdefault(home["id"], []).append((cid, flag))
         comments_xml_items.append(
-            f'<w:comment w:id="{cid}" w:author="interview-skill" w:initials="IS">'
+            f'<w:comment w:id="{cid}" w:author="interview-skill" w:initials="IS"{date_attr}>'
             f"<w:p>{_run(_flag_comment_text(flag))}</w:p></w:comment>"
         )
 
@@ -192,7 +214,7 @@ def build_sidecar(
         "interview": {
             "media": media,
             "duration_seconds": duration,
-            "processed_at": now or datetime.now().isoformat(timespec="seconds"),
+            "processed_at": now or datetime.now().astimezone().isoformat(timespec="seconds"),
         },
         "engines": engines,
         "accuracy_claim": claim,
@@ -201,5 +223,5 @@ def build_sidecar(
         "segments": segments,
         "turns": turns,
         "adjudications": adjudications,
-        "flags": [dict(f, codebook_version=codebook_version) for f in flags],
+        "flags": [dict(copy.deepcopy(f), codebook_version=codebook_version) for f in flags],
     }

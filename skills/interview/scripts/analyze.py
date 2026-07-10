@@ -82,8 +82,10 @@ def validate_flags(flags: list[dict], codebook: dict, duration: float) -> list[s
         for field in required:
             if flag.get(field) in (None, "", []):
                 errors.append(f"{ref}: missing required field '{field}'")
-        markers = flag.get("marker_types") or []
-        if not isinstance(markers, list):
+        markers = flag.get("marker_types")
+        if markers in (None, "", []):
+            markers = []  # already reported missing by the required-field check
+        elif not isinstance(markers, list):
             errors.append(f"{ref}: marker_types must be a list (got {type(markers).__name__})")
             markers = []
         for m in markers:

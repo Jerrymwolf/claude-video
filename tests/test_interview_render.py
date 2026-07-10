@@ -43,6 +43,10 @@ class TestFormatHms:
     def test_hours_rollover(self):
         assert format_hms(3723) == "1:02:03"
 
+    def test_negative_and_none_clamp_to_zero(self):
+        assert format_hms(-115) == "00:00"
+        assert format_hms(None) == "00:00"
+
 
 class TestDocx:
     def _document_xml(self, tmp_path):
@@ -87,6 +91,28 @@ class TestDocx:
         assert "salience 4/5" in comments
         assert "corroborates" in comments
 
+    @staticmethod
+    def _anchored_paragraph_texts(document_xml):
+        """Text of every <w:p> that contains a commentRangeStart."""
+        root = ET.fromstring(document_xml)
+        return [
+            "".join(t.text or "" for t in p.iter(f"{W}t"))
+            for p in root.iter(f"{W}p")
+            if p.find(f"{W}commentRangeStart") is not None
+        ]
+
+    @staticmethod
+    def _assert_comment_ids_consistent(parts):
+        """Every range id has a matching end, reference, and comment body."""
+        doc = ET.fromstring(parts["word/document.xml"])
+        starts = sorted(e.get(f"{W}id") for e in doc.iter(f"{W}commentRangeStart"))
+        ends = sorted(e.get(f"{W}id") for e in doc.iter(f"{W}commentRangeEnd"))
+        refs = sorted(e.get(f"{W}id") for e in doc.iter(f"{W}commentReference"))
+        comments = ET.fromstring(parts["word/comments.xml"])
+        bodies = {e.get(f"{W}id") for e in comments.iter(f"{W}comment")}
+        assert starts == ends == refs
+        assert set(starts) <= bodies
+
     def test_unfindable_quote_anchors_whole_paragraph(self, tmp_path):
         flags = [dict(FLAGS[0], quote="words that appear nowhere")]
         parts = build_docx_parts(TURNS, flags)
@@ -95,6 +121,79 @@ class TestDocx:
         with zipfile.ZipFile(out) as zf:
             doc = zf.read("word/document.xml").decode("utf-8")
         assert "commentRangeStart" in doc  # anchored, not dropped
+        anchored = self._anchored_paragraph_texts(doc)
+        assert len(anchored) == 1
+        assert "INTERVIEWEE" in anchored[0]  # t_start=8.0 → home turn t0002
+
+    def test_flag_between_slop_windows_anchors_to_containing_turn(self):
+        turns = [
+            labeled_turn("t0101", 450.0, 458.0,
+                         "And what happened after that?", "INTERVIEWER"),
+            labeled_turn("t0102", 459.0, 467.0,
+                         "The whole team walked out.", "INTERVIEWEE"),
+        ]
+        flags = [dict(FLAGS[0], quote="words that appear nowhere",
+                      t_start=460.0, t_end=462.0)]
+        parts = build_docx_parts(turns, flags)
+        anchored = self._anchored_paragraph_texts(parts["word/document.xml"])
+        assert len(anchored) == 1
+        # strict containment (459-467) must beat the earlier turn's +2s slop
+        assert "INTERVIEWEE" in anchored[0]
+
+    def test_two_quote_flags_one_turn_both_anchored_in_order(self):
+        flags = [
+            FLAGS[0],
+            dict(FLAGS[0], id="g0002", marker_types=["repetition"], emotion=None,
+                 quote="the layoff decision", t_start=14.0, t_end=17.0),
+        ]
+        parts = build_docx_parts(TURNS, flags)
+        root = ET.fromstring(parts["word/document.xml"])
+        order = [e.get(f"{W}id") for e in root.iter(f"{W}commentRangeStart")]
+        assert order == ["0", "1"]  # document order matches text position order
+        self._assert_comment_ids_consistent(parts)
+
+    def test_overlapping_quotes_second_flag_wraps_whole_paragraph(self):
+        flags = [
+            FLAGS[0],  # "I was furious"
+            dict(FLAGS[0], id="g0002", quote="was furious about"),
+        ]
+        parts = build_docx_parts(TURNS, flags)
+        root = ET.fromstring(parts["word/document.xml"])  # must stay well-formed
+        events = []
+        for el in root.iter():
+            if el.tag == f"{W}commentRangeStart":
+                events.append(("start", el.get(f"{W}id")))
+            elif el.tag == f"{W}commentRangeEnd":
+                events.append(("end", el.get(f"{W}id")))
+        # flag 1 falls back to whole-paragraph and encloses flag 0's exact range
+        assert events == [("start", "1"), ("start", "0"), ("end", "0"), ("end", "1")]
+        self._assert_comment_ids_consistent(parts)
+
+    def test_control_chars_stripped_document_still_parses(self):
+        turns = [labeled_turn("t0001", 0.0, 4.0, "clean\x0bbreak", "INTERVIEWER")]
+        parts = build_docx_parts(turns, [])
+        root = ET.fromstring(parts["word/document.xml"])  # raises if \x0b leaked
+        text = "".join(t.text or "" for t in root.iter(f"{W}t"))
+        assert "\x0b" not in text
+        assert "cleanbreak" in text
+
+    def test_xml_special_chars_round_trip(self):
+        raw = 'Q3 P&L was < plan after the "restructuring"'
+        turns = [labeled_turn("t0001", 0.0, 4.0, raw, "INTERVIEWER")]
+        parts = build_docx_parts(turns, [])
+        root = ET.fromstring(parts["word/document.xml"])
+        text = "".join(t.text or "" for t in root.iter(f"{W}t"))
+        assert raw in text
+
+    def test_comment_omits_salience_when_absent(self):
+        flags = [{k: v for k, v in FLAGS[0].items() if k != "salience"}]
+        parts = build_docx_parts(TURNS, flags)
+        assert "salience" not in parts["word/comments.xml"]
+
+    def test_comment_date_attribute_only_when_now_provided(self):
+        dated = build_docx_parts(TURNS, FLAGS, now="2026-07-10T12:00:00-04:00")
+        assert 'w:date="2026-07-10T12:00:00-04:00"' in dated["word/comments.xml"]
+        assert "w:date" not in build_docx_parts(TURNS, FLAGS)["word/comments.xml"]
 
 
 class TestSidecar:
@@ -124,6 +223,9 @@ class TestSidecar:
         assert len(sc["adjudications"]) == 1
         assert sc["flags"][0]["codebook_version"] == "1.0.0"
         assert sc["turns"][0]["label"] == "INTERVIEWER"
+        # sidecar must not share nested structures with the caller's flags
+        sc["flags"][0]["frame_paths"].append("mutated.jpg")
+        assert "mutated.jpg" not in FLAGS[0]["frame_paths"]
 
     def test_degradation_downgrades_accuracy_claim(self):
         sc = build_sidecar(

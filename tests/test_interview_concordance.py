@@ -157,6 +157,16 @@ class TestValidateFlags:
         assert "must be a list" in errors[0]
         assert not any("unknown marker" in e for e in errors)
 
+    def test_falsy_non_list_marker_types_rejected(self):
+        errors = validate_flags([self._flag(marker_types=False)], CODEBOOK, 600.0)
+        assert any("must be a list (got bool)" in e for e in errors)
+        errors = validate_flags([self._flag(marker_types=0)], CODEBOOK, 600.0)
+        assert any("must be a list (got int)" in e for e in errors)
+
+    def test_none_marker_types_reports_only_missing_field(self):
+        errors = validate_flags([self._flag(marker_types=None)], CODEBOOK, 600.0)
+        assert errors == ["g0001: missing required field 'marker_types'"]
+
 
 class TestBurstTimestamps:
     def test_five_points_centered_on_span_midpoint(self):
