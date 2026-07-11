@@ -145,7 +145,7 @@ Read `"${SKILL_DIR}/scripts/codebook.json"` **fresh each run** (never from memor
 
 - `id`: `g0001`, `g0002`, … — sequential and **unique** (duplicates are rejected by validation).
 - `marker_types`: non-empty list of marker ids from the codebook.
-- `quote`: **verbatim substring of a turn's text** — the interviewee's words only, no paraphrase.
+- `quote`: **verbatim substring of the interviewee's speech** — no paraphrase. May span consecutive sentences by the same speaker; must never cross a speaker change.
 - `t_start`/`t_end`: seconds, within the media duration.
 - `salience`: integer 1–5 per the codebook's scale. Reserve 5 for genuinely interview-defining moments.
 - `emotion`: required **iff** `marker_types` includes `emotional_display`; must come from the codebook's emotions list.
@@ -165,7 +165,7 @@ Then validate:
 python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR [--duration <seconds>]
 ```
 
-`--duration` is optional — when omitted it is auto-derived from the final transcript's last segment. Pass it explicitly for exactness: get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. Quotes are checked verbatim against the diarized transcript — a paraphrase fails validation. On errors, fix `flags.json` per each printed line and re-run until it prints `OK`. Validation gates the frame stage — never proceed past a failing validate.
+`--duration` is optional — when omitted it is auto-derived from the final transcript's last segment. Pass it explicitly for exactness: get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. Quotes are checked verbatim against the diarized transcript (merged same-speaker view) — a paraphrase fails validation. A quote may span consecutive sentences by the SAME speaker, but must never cross a speaker change. On errors, fix `flags.json` per each printed line and re-run until it prints `OK`. Validation gates the frame stage — never proceed past a failing validate.
 
 ## Step 6 — Frame evidence (video only)
 

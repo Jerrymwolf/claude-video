@@ -158,6 +158,11 @@ def cmd_concordance(args) -> int:
         print(f"ERROR: need >=2 panel files, found {len(panel_files)}", file=sys.stderr)
         return 1
     panels = [_load(p) for p in panel_files]
+    uncovered = sorted({t["id"] for t in turns} - set().union(*(set(p) for p in panels)))
+    if uncovered:
+        print(f"WARNING: {len(uncovered)} turn id(s) have no panel votes — unit "
+              f"mismatch? (e.g. finalize re-run with a different --unit): "
+              f"{', '.join(uncovered[:5])}", file=sys.stderr)
     scores = compute_concordance(turns, panels)
     for t in turns:
         t["label"] = scores[t["id"]]["label"]
@@ -187,7 +192,12 @@ def cmd_validate_flags(args) -> int:
     transcript_text = None
     if (work / "diarized.json").exists():
         turns = _load(work / "diarized.json")
-        transcript_text = "\n".join(t["text"] for t in turns)
+        if turns and all("label" in t for t in turns):
+            # Validate against the same merged view the docx anchors against,
+            # so a verbatim quote spanning two same-speaker sentences passes.
+            transcript_text = "\n".join(t["text"] for t in merge_labeled_turns(turns))
+        else:
+            transcript_text = "\n".join(t["text"] for t in turns)
     errors = validate_flags(flags, codebook, duration, transcript_text=transcript_text)
     if errors:
         print("INVALID FLAGS:")
@@ -274,7 +284,11 @@ def cmd_render(args) -> int:
     )
     # The docx displays consecutive same-label units merged into readable
     # turns; the sidecar keeps the unit-level labels (the research record).
-    display_turns = merge_labeled_turns(turns) if turns and "label" in turns[0] else turns
+    if not turns or not all("label" in t for t in turns):
+        print("ERROR: render requires labeled turns — run concordance first",
+              file=sys.stderr)
+        return 1
+    display_turns = merge_labeled_turns(turns)
     docx_path = write_docx(
         build_docx_parts(display_turns, flags, claim=sidecar["accuracy_claim"], notes=notes),
         base / "transcript.docx",

@@ -256,3 +256,73 @@ class TestMergeLabeledTurns:
         ]
         merged = merge_labeled_turns(units)
         assert [m["label"] for m in merged] == ["INTERVIEWER", "UNCLEAR", "INTERVIEWER"]
+
+
+class TestMergeHardening:
+    def _unit(self, tid, start, end, text, label, concordance=1.0, idx=0):
+        return {"id": tid, "start": start, "end": end, "text": text,
+                "label": label, "concordance": concordance, "segment_indices": [idx]}
+
+    def test_consecutive_unclear_units_never_merge(self):
+        from analyze import merge_labeled_turns
+        units = [
+            self._unit("t0001", 0.0, 2.0, "a", "UNCLEAR", 0.5, 0),
+            self._unit("t0002", 2.0, 4.0, "b", "UNCLEAR", 0.5, 1),
+            self._unit("t0003", 4.0, 6.0, "c", "INTERVIEWEE", 1.0, 2),
+        ]
+        merged = merge_labeled_turns(units)
+        assert [m["label"] for m in merged] == ["UNCLEAR", "UNCLEAR", "INTERVIEWEE"]
+
+    def test_unlabeled_units_rejected_with_clear_error(self):
+        import pytest
+        from analyze import merge_labeled_turns
+        units = [self._unit("t0001", 0.0, 2.0, "a", "INTERVIEWEE"),
+                 {"id": "t0002", "start": 2.0, "end": 4.0, "text": "b",
+                  "segment_indices": [1]}]
+        with pytest.raises(ValueError, match="t0002"):
+            merge_labeled_turns(units)
+
+    def test_cross_unit_quote_validates_against_merged_view(self):
+        from analyze import merge_labeled_turns, validate_flags
+        units = [
+            self._unit("t0001", 0.0, 3.0, "It was a huge success.", "INTERVIEWEE", 1.0, 0),
+            self._unit("t0002", 3.0, 6.0, "We shipped it on time.", "INTERVIEWEE", 1.0, 1),
+        ]
+        merged_text = "\n".join(t["text"] for t in merge_labeled_turns(units))
+        flag = {"id": "g0001", "marker_types": ["repetition"],
+                "quote": "huge success. We shipped it", "t_start": 1.0,
+                "t_end": 4.0, "salience": 2}
+        assert validate_flags([flag], CODEBOOK, 10.0, transcript_text=merged_text) == []
+        # the raw unit-joined view would have failed exactly this quote
+        unit_text = "\n".join(t["text"] for t in units)
+        errors = validate_flags([flag], CODEBOOK, 10.0, transcript_text=unit_text)
+        assert any("verbatim" in e for e in errors)
+
+    def test_flag_anchors_inside_merged_turn(self):
+        import zipfile
+        import xml.etree.ElementTree as ET
+        from analyze import merge_labeled_turns
+        from render import build_docx_parts
+        units = [
+            self._unit("t0001", 0.0, 3.0, "Tell me more.", "INTERVIEWER", 1.0, 0),
+            self._unit("t0002", 3.0, 100.0, "The project started well.", "INTERVIEWEE", 1.0, 1),
+            self._unit("t0003", 100.0, 200.0, "But then I was furious about the cut.", "INTERVIEWEE", 1.0, 2),
+            self._unit("t0004", 200.0, 300.0, "We recovered eventually.", "INTERVIEWEE", 1.0, 3),
+        ]
+        merged = merge_labeled_turns(units)
+        assert len(merged) == 2  # INTERVIEWER + one merged INTERVIEWEE block
+        flags = [{"id": "g0001", "marker_types": ["emotional_display"],
+                  "emotion": "anger", "quote": "I was furious about the cut",
+                  "t_start": 150.0, "t_end": 160.0, "salience": 3}]
+        parts = build_docx_parts(merged, flags)
+        root = ET.fromstring(parts["word/document.xml"])
+        W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        inside, anchored = False, []
+        for el in root.iter():
+            if el.tag == f"{W}commentRangeStart":
+                inside = True
+            elif el.tag == f"{W}commentRangeEnd":
+                inside = False
+            elif el.tag == f"{W}t" and inside:
+                anchored.append(el.text or "")
+        assert "".join(anchored) == "I was furious about the cut"

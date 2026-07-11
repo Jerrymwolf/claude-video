@@ -15,7 +15,9 @@ CONCORDANCE_THRESHOLD = 2 / 3
 def build_turns(segments: list[dict], gap_seconds: float = 1.0) -> list[dict]:
     """Group consecutive segments into speaker-turn candidates, split on gaps.
 
-    A turn is the diarization unit: the panel labels turns, not segments.
+    Non-default path (--unit gap): useful only when speakers leave real
+    silence between turns. The default diarization unit is the segment
+    (see segment_turns) — rapid dyadic exchange defeats gap splitting.
     """
     turns: list[dict] = []
     for idx, seg in sorted(enumerate(segments), key=lambda p: (float(p[1]["start"]), float(p[1]["end"]))):
@@ -64,11 +66,19 @@ def merge_labeled_turns(turns: list[dict]) -> list[dict]:
     Turn boundaries are downstream of labeling, not upstream: units carry the
     panel's judgment, and adjacent units sharing a final label collapse into
     one readable turn. A merged turn's concordance is the MINIMUM of its
-    members — a turn is only as reliable as its weakest unit.
+    members — a turn is only as reliable as its weakest unit. UNCLEAR units
+    never merge with each other: UNCLEAR means the panel could not assign a
+    speaker, so adjacent UNCLEAR units may be different voices.
     """
+    missing = [t.get("id", "?") for t in turns
+               if "label" not in t or "concordance" not in t]
+    if missing:
+        raise ValueError(
+            f"units missing label/concordance (run concordance first): {', '.join(missing[:5])}"
+        )
     merged: list[dict] = []
     for t in turns:
-        if merged and merged[-1]["label"] == t["label"]:
+        if merged and merged[-1]["label"] == t["label"] and t["label"] != "UNCLEAR":
             m = merged[-1]
             m["text"] = f"{m['text']} {t['text']}".strip()
             m["end"] = max(m["end"], float(t["end"]))
