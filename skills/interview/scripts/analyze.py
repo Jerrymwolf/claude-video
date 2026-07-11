@@ -35,6 +35,58 @@ def build_turns(segments: list[dict], gap_seconds: float = 1.0) -> list[dict]:
     return turns
 
 
+def segment_turns(segments: list[dict]) -> list[dict]:
+    """One diarization unit per transcript segment (sentence-scale).
+
+    Gap-based grouping under-segments rapid dyadic exchange — speakers often
+    alternate with no silence between them, so a single "turn" can swallow
+    minutes of both voices. Segment-level units keep the labeling unit small;
+    same-label units are merged AFTER concordance (merge_labeled_turns).
+    """
+    turns: list[dict] = []
+    for idx, seg in sorted(enumerate(segments), key=lambda p: (float(p[1]["start"]), float(p[1]["end"]))):
+        text = seg["text"].strip()
+        if not text:
+            continue
+        turns.append({
+            "id": f"t{len(turns) + 1:04d}",
+            "start": float(seg["start"]),
+            "end": float(seg["end"]),
+            "text": text,
+            "segment_indices": [idx],
+        })
+    return turns
+
+
+def merge_labeled_turns(turns: list[dict]) -> list[dict]:
+    """Merge consecutive same-label units into display turns, post-diarization.
+
+    Turn boundaries are downstream of labeling, not upstream: units carry the
+    panel's judgment, and adjacent units sharing a final label collapse into
+    one readable turn. A merged turn's concordance is the MINIMUM of its
+    members — a turn is only as reliable as its weakest unit.
+    """
+    merged: list[dict] = []
+    for t in turns:
+        if merged and merged[-1]["label"] == t["label"]:
+            m = merged[-1]
+            m["text"] = f"{m['text']} {t['text']}".strip()
+            m["end"] = max(m["end"], float(t["end"]))
+            m["concordance"] = min(m["concordance"], t["concordance"])
+            m["segment_indices"].extend(t["segment_indices"])
+            continue
+        merged.append({
+            "id": f"m{len(merged) + 1:04d}",
+            "start": float(t["start"]),
+            "end": float(t["end"]),
+            "text": t["text"],
+            "label": t["label"],
+            "concordance": float(t["concordance"]),
+            "segment_indices": list(t["segment_indices"]),
+        })
+    return merged
+
+
 def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
     """Merge panel label sets into a final label + concordance score per turn.
 

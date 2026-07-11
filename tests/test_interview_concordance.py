@@ -214,3 +214,45 @@ class TestBurstTimestamps:
         points = burst_timestamps(29.0, 30.0, max(duration - 0.1, 0.0))
         assert points
         assert all(p <= duration - 0.1 for p in points)
+
+
+class TestSegmentTurns:
+    def test_one_unit_per_nonempty_segment_in_time_order(self):
+        from analyze import segment_turns
+        segments = [seg(5.0, 8.0, "second"), seg(0.0, 2.0, "first"), seg(9.0, 9.5, "  ")]
+        turns = segment_turns(segments)
+        assert [t["text"] for t in turns] == ["first", "second"]
+        assert [t["id"] for t in turns] == ["t0001", "t0002"]
+        assert turns[0]["segment_indices"] == [1]  # original list position
+        assert turns[1]["segment_indices"] == [0]
+
+
+class TestMergeLabeledTurns:
+    def _unit(self, tid, start, end, text, label, concordance, idx):
+        return {"id": tid, "start": start, "end": end, "text": text,
+                "label": label, "concordance": concordance, "segment_indices": [idx]}
+
+    def test_consecutive_same_label_units_merge_conservatively(self):
+        from analyze import merge_labeled_turns
+        units = [
+            self._unit("t0001", 0.0, 2.0, "Tell me", "INTERVIEWER", 1.0, 0),
+            self._unit("t0002", 2.0, 4.0, "about a time.", "INTERVIEWER", 0.67, 1),
+            self._unit("t0003", 4.0, 9.0, "It was 2019.", "INTERVIEWEE", 1.0, 2),
+        ]
+        merged = merge_labeled_turns(units)
+        assert len(merged) == 2
+        assert merged[0]["text"] == "Tell me about a time."
+        assert merged[0]["label"] == "INTERVIEWER"
+        assert merged[0]["concordance"] == 0.67  # min of members
+        assert merged[0]["segment_indices"] == [0, 1]
+        assert merged[1]["label"] == "INTERVIEWEE"
+
+    def test_different_labels_never_merge(self):
+        from analyze import merge_labeled_turns
+        units = [
+            self._unit("t0001", 0.0, 2.0, "a", "INTERVIEWER", 1.0, 0),
+            self._unit("t0002", 2.0, 4.0, "b", "UNCLEAR", 1.0, 1),
+            self._unit("t0003", 4.0, 6.0, "c", "INTERVIEWER", 1.0, 2),
+        ]
+        merged = merge_labeled_turns(units)
+        assert [m["label"] for m in merged] == ["INTERVIEWER", "UNCLEAR", "INTERVIEWER"]

@@ -13,7 +13,14 @@ from pathlib import Path
 
 import framegrab
 import stt
-from analyze import build_turns, burst_timestamps, compute_concordance, validate_flags
+from analyze import (
+    build_turns,
+    burst_timestamps,
+    compute_concordance,
+    merge_labeled_turns,
+    segment_turns,
+    validate_flags,
+)
 from dual_transcribe import apply_adjudications, diff_transcripts, transcribe_both
 from render import build_docx_parts, build_sidecar, format_hms, write_docx
 
@@ -132,7 +139,10 @@ def cmd_finalize(args) -> int:
     )
     _save(work / "final_transcript.json", segments)
     _save(work / "audit_log.json", audit)
-    turns = build_turns(segments)
+    if args.unit == "gap":
+        turns = build_turns(segments)
+    else:  # segment-scale units: rapid dyadic exchange defeats gap splitting
+        turns = segment_turns(segments)
     _save(work / "turns.json", turns)
     print(f"SEGMENTS: {len(segments)}  TURNS: {len(turns)}  ADJUDICATED: {len(audit)}")
     for t in turns:
@@ -262,8 +272,11 @@ def cmd_render(args) -> int:
     notes = degradation + (
         ["transcription gaps: " + "; ".join(partial)] if partial else []
     )
+    # The docx displays consecutive same-label units merged into readable
+    # turns; the sidecar keeps the unit-level labels (the research record).
+    display_turns = merge_labeled_turns(turns) if turns and "label" in turns[0] else turns
     docx_path = write_docx(
-        build_docx_parts(turns, flags, claim=sidecar["accuracy_claim"], notes=notes),
+        build_docx_parts(display_turns, flags, claim=sidecar["accuracy_claim"], notes=notes),
         base / "transcript.docx",
     )
     _save(base / "sidecar.json", sidecar)
@@ -306,7 +319,7 @@ def main() -> int:
     sub.add_parser("preflight")
     p = sub.add_parser("discover"); p.add_argument("folder")
     p = sub.add_parser("transcribe"); p.add_argument("media"); p.add_argument("--out-dir")
-    p = sub.add_parser("finalize"); p.add_argument("--work", required=True)
+    p = sub.add_parser("finalize"); p.add_argument("--work", required=True); p.add_argument("--unit", choices=["segment", "gap"], default="segment")
     p = sub.add_parser("concordance"); p.add_argument("--work", required=True)
     p = sub.add_parser("validate-flags"); p.add_argument("--work", required=True); p.add_argument("--duration")
     p = sub.add_parser("frames"); p.add_argument("media"); p.add_argument("--out-dir")

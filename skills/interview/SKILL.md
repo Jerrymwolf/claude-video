@@ -123,6 +123,8 @@ python3 "${SKILL_DIR}/scripts/interview.py" finalize --work WORK_DIR
 
 It prints `SEGMENTS / TURNS / ADJUDICATED` counts, then the numbered turn list — each turn's id (`t0001`, …), time range, and text. This turn list is the input to the diarization panel.
 
+By default each unit is one transcript segment (sentence-scale) — rapid dyadic exchange defeats silence-gap splitting, so labeling happens on small units and consecutive same-label units are merged into readable turns in the .docx after concordance (the sidecar keeps the unit-level labels). Pass `--unit gap` only for recordings with clear silence between speakers. Expect one unit per sentence: a 60-minute interview yields several hundred units; the panel must label every one.
+
 ## Step 4 — Diarization panel (judgment job 2)
 
 Dispatch THREE independent subagents via the Agent tool, **all in one message** so they run in parallel with isolated contexts — that isolation is what makes their agreement a real reliability measure. Each gets this prompt with the full numbered turn list from finalize appended:
