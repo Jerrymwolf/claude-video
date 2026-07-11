@@ -1,287 +1,143 @@
 # Gravitas
 
-**Interview transcription that measures narrative gravity.** Gravitas ingests social-science interview recordings and produces dual-engine verified, speaker-diarized transcripts with moments of narrative gravity — emotional displays, repetitions, quoted speech, temporal shifts — flagged against a versioned codebook, with frame evidence. A fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video), whose `/watch` skill ships here unchanged. Gravitas itself is the [`/interview` skill](#interview-fork-addition) — spec in [issue #1](https://github.com/Jerrymwolf/gravitas/issues/1).
+**Interview transcription that measures narrative gravity.**
+
+Gravitas turns a recorded research interview into usable qualitative data: a speaker-labeled transcript that two independent speech engines agree on, with the analytically heavy moments — the emotional displays, the stories told twice, the dialogue re-enacted, the timelines that collapse — flagged where they happen and backed by the interviewee's face on camera. You point it at a recording (or a folder of them) and get back a Word document you can code in and a JSON record a pipeline can read.
+
+It's the `/interview` skill, a fork of Brad Bonanno's [claude-video](https://github.com/bradautomates/claude-video). The upstream `/watch` skill ships here unchanged; [see below](#also-included-watch).
 
 ---
 
-# /watch
+## Why this exists
 
-**Give Claude the ability to watch any video.**
+A researcher with a corpus of recorded interviews has no good option between two bad ones. Hand-transcription is slow and expensive. Single-engine machine transcription makes silent errors — concentrated exactly where they hurt: proper nouns, jargon, emotional overlapping speech — with no way to know where. Neither tells you who is speaking. And the richest layer, the moments where the telling carries unusual weight, only surfaces if a human listens to every minute.
 
-Claude Code (recommended — auto-updates via marketplace):
-```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
-```
+Gravitas attacks all three:
 
-Codex, Cursor, Copilot, Gemini CLI, or any of 50+ [Agent Skills](https://agentskills.io) hosts:
-```bash
-npx skills add bradautomates/claude-video -g
-```
-(`-g` installs globally for your user, available across all projects. Drop it to scope per-project.)
+- **Errors become visible instead of silent.** Every interview is transcribed twice — Groq's `whisper-large-v3` and OpenAI's `whisper-1` — and the two outputs are diffed word by word. Where they disagree is exactly where transcription is uncertain. Each disagreement is adjudicated with a logged rationale, so the final transcript is a decision, not a guess, and every decision is inspectable.
+- **Speakers get labeled, with a reliability number.** A panel of three independent analysts labels every turn `INTERVIEWER`, `INTERVIEWEE`, or `OTHER`. Their agreement is recorded per turn as a concordance score. Turns that fit neither party — a third voice, crosstalk, a to-camera aside — are labeled `OTHER`, never forced into the dyad.
+- **Gravity is coded against a fixed construct.** Interviewee turns are scored against a versioned codebook of observable discourse markers. Each flagged moment carries its marker type, a salience rating, a verbatim quote, a timestamp, and — for video — a burst of frames pulled at that exact moment, read as corroborating or disconfirming evidence.
 
-More install options (claude.ai web, manual) in the [Install](#install) section below.
+The whole pipeline is automatic and produces persistent, citable artifacts. The compensating control for "no human in the loop" is total evidence retention: every flag and every adjudication keeps its evidence, so any claim can be audited after the fact without re-running.
 
-Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. Whisper API key is only needed when a video has no captions.
+## What one interview produces
 
----
+Everything lands next to the media in `<stem>_interview/`:
 
-Claude can read a webpage, run a script, browse a repo. What it can't do, out of the box, is *watch a video*. You paste a YouTube link and it has to either guess from the title or pull a transcript that's missing 90% of what's on screen.
+- **`transcript.docx`** — a speaker-labeled, timestamped transcript. Each gravity moment is a Word comment anchored on the exact quoted span (marker, emotion, salience, the frame evidence). The accuracy claim is printed in the document itself, because the .docx travels alone in document-based coding workflows. Opens and codes like any transcript.
+- **`sidecar.json`** — the machine-readable research record: every segment with its speaker label and concordance score, the full adjudication audit log (both engine readings, the chosen text, the rationale), every flag with its evidence bundle, and run metadata (engines, codebook version, any degradation).
+- **`work/` and `frames/`** — every intermediate, retained as the audit trail. Not cleaned up.
 
-With Claude Video `/watch` you can paste a URL or a local path, ask a question, and Claude fetches captions first, downloads only what it needs, extracts frames (scene-aware, or fast keyframes at `efficient` detail), pulls a timestamped transcript (free captions when available, Whisper API as fallback), and `Read`s every frame as an image. By the time it answers, it has *seen* the video and *heard* the audio.
-
-```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-```
-
-## What people actually use it for
-
-**Analyze someone else's content.** `/watch https://youtu.be/<viral-video> what hook did they open with?` Claude looks at the first frames, reads the opening transcript, breaks down the structure. Same for ad creative, competitor launches, podcast intros, anything where the *how* matters as much as the *what*.
-
-**Diagnose a bug from a video.** Someone sends you a screen recording of something broken. `/watch bug-repro.mov what's going wrong?` Claude watches the recording, finds the frame where the issue appears, describes what's on screen, often catches the cause without you ever opening the file.
-
-**Summarize a video.** `/watch https://youtu.be/<long-thing> summarize this` does the obvious thing — pulls the structure, the key moments, what was actually said and shown. Faster than watching at 2x.
-
-**Cut the hype out of an update video.** `/watch https://youtu.be/<launch-video> what's actually new — skip the hype` Strip a "game-changer" feature drop down to the few things that matter, so you get the substance without ten minutes of intro and overselling.
-
-**Turn a playlist into notes.** `/watch https://youtu.be/<video> summarize this to a note` Run it across a series and file a per-video summary, so a channel or course becomes a searchable set of notes instead of hours you have to sit through.
+Batch runs add a corpus-level summary of flags across the whole set.
 
 ## How it works
 
-1. **You paste a video and a question.** URL (anything yt-dlp supports — YouTube, Loom, TikTok, X, Instagram, plus a few hundred more) or a local path (`.mp4`, `.mov`, `.mkv`, `.webm`).
-2. **`yt-dlp` checks captions first.** At `transcript` detail, captioned URLs return without downloading video. Otherwise, or when Whisper needs audio, it downloads only what the run needs.
-3. **`ffmpeg` extracts frames at the chosen detail.** `efficient` decodes keyframes only (near-instant); `balanced`/`token-burner` prefer scene-change frames and fall back to the duration-aware uniform sampler when they under-produce. JPEGs are 512px wide by default and clamped to 1998px tall for Claude Read compatibility.
-4. **The transcript comes from one of two places.** First try: `yt-dlp` pulls native captions (manual or auto-generated) from the source. Free, instant, accurate-ish. Fallback: extract a mono 16 kHz 64 kbps mp3 audio clip (~480 kB/min) and ship it to Whisper — Groq's `whisper-large-v3` (preferred — cheaper and faster) or OpenAI's `whisper-1`.
-5. **Frames + transcript are handed to Claude.** The script prints frame paths with `t=MM:SS` markers and the transcript with timestamps. Claude `Read`s each frame in parallel — JPEGs render directly as images in its context.
-6. **Claude answers grounded in what's actually on screen and in the audio.** Not "based on the description" or "according to the title." It saw the frames. It heard the transcript. It answers the way someone who watched the video would.
-7. **Cleanup.** The script prints a working directory at the end. If you're not asking follow-ups, Claude removes it.
+The skill drives a deterministic Python pipeline stage by stage; the judgment (adjudicating diffs, labeling speakers, coding gravity) is Claude's, the mechanics are the scripts'.
 
-## Frame budget — why it matters
+1. **Dual transcription.** Audio is extracted once (mono 16 kHz) and sent to both Whisper engines; anything over the API cap is chunked automatically.
+2. **Diff.** The two transcripts are aligned word-by-word. Agreements become the base transcript; each disagreement becomes a numbered span with both readings and surrounding context.
+3. **Adjudication.** Claude resolves every disagreement — choosing a reading, or deleting a hallucinated filler — and logs a short rationale. The result is the final transcript plus an audit log.
+4. **Diarization panel.** Three independent analysts label every unit `INTERVIEWER` / `INTERVIEWEE` / `OTHER`; a concordance function merges their votes into a per-unit label and score, with `UNCLEAR` for turns that don't reach agreement.
+5. **Gravity pass.** Interviewee turns are coded against the codebook. Each flag is validated against the schema (verbatim quote, valid marker, salience in range) before it can proceed.
+6. **Frame evidence.** For video, a short burst of frames is extracted at each flagged moment only — never a full-video scan — and read as visual corroboration. A contradiction is recorded, not suppressed.
+7. **Render.** The `.docx` and `sidecar.json` are written; the honest accuracy claim is stamped into both.
 
-Token cost is dominated by frames. Every frame is an image; image tokens add up fast. The script's auto-fps logic exists so you don't blow your context budget on a sparse scan of a 30-minute video that would have been better answered by a focused 30-second window.
+## The narrative-gravity codebook
 
-| Duration | Default frame budget | What you get |
-|----------|---------------------|--------------|
-| ≤30 s | ~30 frames | Dense — basically every key moment |
-| 30 s - 1 min | ~40 frames | Still dense |
-| 1 - 3 min | ~60 frames | Comfortable |
-| 3 - 10 min | ~80 frames | Sparse but workable |
-| > 10 min | 100 frames (capped modes) | "Sparse scan" warning — re-run focused, or `--detail token-burner` for full uncapped coverage |
+The construct is a shipped, versioned data file (`skills/interview/scripts/codebook.json`, currently **v1.0.0**), so any analysis run can cite the exact definition it used. A moment carries narrative gravity when it shows one or more observable markers:
 
-When the user names a moment ("around 2:30", "the last 30 seconds", "from 0:45 to 1:00"), pass `--start` / `--end`. Focused mode gets denser per-second budgets, capped at 2 fps. Far more useful than a sparse pass over the whole thing.
+| Marker | What it captures |
+|--------|------------------|
+| `emotional_display` | A felt emotion tied to the content (carries an emotion label) |
+| `repetition` | The interviewee returns to the same event or claim unprompted |
+| `quoted_speech` | Dialogue re-enacted rather than reported ("and he said to me…") |
+| `temporal_shift` | The telling breaks timeline — historic present, sudden jumps |
+| `disfluency_cluster` | A localized spike in false starts or fillers against baseline |
+| `pause_then_rush` | A marked silence followed by dense, rapid speech |
 
-## Frame deduplication
+Emotional displays draw from a fixed vocabulary of 14 emotions (anger, sadness, excitement, fear, joy, surprise, disgust, shame, pride, grief, anxiety, frustration, relief, contempt). Every flag carries a **salience** rating from 1 (incidental) to 5 (interview-defining). Zero flags is a valid outcome for a flat interview — the tool does not invent gravity.
 
-Frame selection — keyframes (`efficient`), scene-change detection (`balanced`/`token-burner`), or the uniform sampler it falls back to — can still surface near-identical frames: a screen recording that holds one slide for 90 seconds produces a dozen, each billed as a separate image. A dedup pass drops them before frames reach Claude. It runs by default on every frame mode (`--no-dedup` turns it off):
+## Honest claims
 
-1. One `ffmpeg` call scales each extracted JPEG to a 16×16 grayscale thumbnail. Everything after is pure-stdlib Python — no image libraries.
-2. For each frame, compute the **mean absolute difference** against the *last frame that was kept* (average per-pixel brightness change, 0–255 scale).
-3. If that difference is at or below the threshold (`2.0`), the frame is a near-duplicate and is dropped. Otherwise it's kept and becomes the new reference.
-4. The frame-budget cap applies *after* dedup, so the budget is spent on distinct frames.
+Gravitas never claims a transcript is "error-free" — the architecture can't guarantee that, and the tool's language says so. The claim it does make, printed in both artifacts, is one of:
 
-Comparing against the last *kept* frame (not the previous one) catches slow fades that never trip a frame-to-frame threshold. The threshold is deliberately low and measures absolute brightness rather than structure, so a one-line code diff, a terminal scrolling a row, or two differently-colored flat slides all survive.
+- **`dual-engine verified with logged adjudication`** — both engines ran, every disagreement was adjudicated.
+- **`… ; INCOMPLETE — transcription gaps recorded`** — a chunk failed; the gap is named in the record.
+- **`single-engine UNVERIFIED`** — only one key was configured; there was nothing to cross-check.
 
-The **Frames** line reports what was collapsed, e.g. `6 selected from 14 candidates (… 8 near-duplicates dropped …)`. On always-moving footage nothing is dropped and you pay what you would have anyway.
-
-## Detail modes — measured
-
-The `--detail` dial trades speed and token cost for visual fidelity. Numbers below are from a real run against a **49:08** YouTube video (1280×720, English auto-captions) — a long, mostly-static screen recording, the case that stresses the caps hardest. Extraction times are local CPU against a pre-downloaded copy; the one-time download was **~37 s** / 76 MB, shared by the three frame modes.
-
-| Mode | Engine | Frames | Cap | Extraction time | Temporal coverage | Est. image tokens |
-|------|--------|--------|-----|-----------------|-------------------|-------------------|
-| `transcript` | none (captions) | 0 | — | **~4.5 s** (one yt-dlp call, no download) | full (text) | 0 (≈26.6k text tokens) |
-| `efficient` | keyframe (`-skip_frame nokey`) | 50 | 50 | **~0.5 s** | 0:00 → 49:04 (full) | **~9.8k** |
-| `balanced` | scene-change | 100 | 100 | **~20.9 s** | 0:00 → 48:38 (full) | **~19.7k** |
-| `token-burner` | scene-change | 116 | uncapped | **~21.0 s** | 0:00 → 48:38 (full) | **~22.8k** |
-
-- **Image tokens** use Anthropic's `(width × height) / 750` — at the default 512px width these 720p frames are 512×288, **≈197 tokens/frame**; `--resolution 1024` roughly 4×s that. The transcript is surfaced in every captioned mode and on long videos is often the larger cost.
-- **One sampling rule across frame modes.** Each detects all candidates across the full range, then even-samples (first + last always kept) down to its cap. The modes differ only in candidate *source* (keyframes vs. scene cuts) and cap, never in how coverage is spread — so the last frame always lands at the end, not partway through.
-- **`efficient` is the speed tier** (~0.5 s) — it only reconstructs keyframes, so it's ~40× faster than the scene modes, which decode every frame to find cuts. It can also return *more* frames than `balanced` on low-motion footage (keyframes outnumber scene cuts); "efficient" means fast extraction, not fewer frames.
-- **`token-burner` only diverges from `balanced` past the cap.** This clip had 116 cuts, so `balanced` sampled 100 and `token-burner` kept all 116. On high-motion video with hundreds of cuts, `token-burner` keeps everything (and trips the >250-frame token warning) while `balanced` thins to 100.
-
-End-to-end from a cold URL, `transcript` is the cheapest mode by far; the frame modes add the shared ~37 s download on top of the extraction times above.
+Accepted, on-the-record limits: the diff can't catch an error both engines make identically; the text-only diarization panel can share blind spots on acoustically ambiguous turns; adjudication happens without hearing the audio; and automatic emotion flags are machine claims — mitigated only by the retained evidence, which lets you overturn any one of them.
 
 ## Install
 
-| Surface | Install |
-|---------|---------|
-| **Claude Code** | `/plugin marketplace add bradautomates/claude-video` then `/plugin install watch@claude-video` |
-| **Codex, Cursor, Copilot, Gemini CLI, +50 more** | `npx skills add bradautomates/claude-video -g` |
-| **claude.ai** (web) | [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) → Settings → Capabilities → Skills → `+` |
-| **Manual / dev** | `git clone` then symlink `skills/watch` into your host's skills dir (see below) |
+Gravitas is the `skills/interview/` skill. It's self-contained (pure-stdlib Python over `ffmpeg`; `yt-dlp` only for URL sources), so it installs as a folder.
 
-### Claude Code
-
-```
-/plugin marketplace add bradautomates/claude-video
-/plugin install watch@claude-video
-```
-
-Update later with `/plugin update watch@claude-video`.
-
-### Codex, Cursor, Copilot, Gemini CLI, and 50+ other hosts
-
-The [Agent Skills](https://agentskills.io) CLI installs the skill into whatever agents it detects:
-
+**Claude Code (symlink the working tree):**
 ```bash
-npx skills add bradautomates/claude-video -g
+git clone https://github.com/Jerrymwolf/gravitas.git
+ln -s "$(pwd)/gravitas/skills/interview" ~/.claude/skills/interview
 ```
 
-`-g` installs globally for your user (`~/.codex/skills`, `~/.cursor/skills`, etc.); drop it to install into the current project instead. Useful flags:
+**Any Agent Skills host (Codex, Cursor, Gemini CLI, …):** point your host's skill loader at `skills/interview/` — `SKILL.md` and its `scripts/` copy as one unit and resolve their own paths on any host.
 
-- `-a, --agent <names…>` — target specific hosts, e.g. `-a codex -a cursor`
-- `-l, --list` — list the skills in this repo without installing
-- `--copy` — copy files instead of symlinking (for filesystems without symlink support)
+## Setup
 
-The CLI discovers the skill from `skills/watch/SKILL.md` and copies the whole folder — `SKILL.md` plus its `scripts/` runtime — as a self-contained unit. `SKILL.md` resolves its own scripts relative to wherever it was installed, so it works the same on every host.
+The first run's `preflight` checks for `ffmpeg`/`ffprobe` and both Whisper keys. Put them in `~/.config/watch/.env` (mode `0600`):
 
-Update later with `npx skills update watch -g`.
-
-### claude.ai (web)
-
-1. [Download `watch.skill`](https://github.com/bradautomates/claude-video/releases/latest) from the latest release.
-2. Go to Settings → Capabilities → Skills.
-3. Click `+` and drop the file in.
-
-Enable "Code execution and file creation" under Capabilities first — the skill shells out to `ffmpeg` and `yt-dlp`, so it won't run without it.
-
-### Manual (developer)
-
-Clone the repo and symlink the self-contained skill folder into your host's skills directory — the symlink keeps the install in sync with your working tree as you edit:
-
-```bash
-git clone https://github.com/bradautomates/claude-video.git
-ln -s "$(pwd)/claude-video/skills/watch" ~/.claude/skills/watch   # or ~/.codex/skills/watch
+```
+GROQ_API_KEY=...      # console.groq.com/keys — whisper-large-v3
+OPENAI_API_KEY=...    # platform.openai.com/api-keys — whisper-1
 ```
 
-For claude.ai, build the `.skill` bundle from source: `bash skills/watch/scripts/build-skill.sh` produces `dist/watch.skill`.
+Both keys unlock the dual-engine verification. A single key still runs the whole pipeline, but every artifact is honestly marked `single-engine UNVERIFIED`. Cost is small — a 7-minute interview transcribes on both engines for well under a dime.
 
-## First run
-
-On the first `/watch` call, the skill runs `scripts/setup.py --check`. If `ffmpeg` / `yt-dlp` aren't on your PATH, or no Whisper API key is set, it walks you through fixing it:
-
-- **macOS** — auto-runs `brew install ffmpeg yt-dlp`.
-- **Linux** — prints the exact `apt` / `dnf` / `pipx` commands.
-- **Windows** — prints the `winget` / `pip` commands.
-- **API key** — scaffolds `~/.config/watch/.env` (mode `0600`) with commented placeholders for `GROQ_API_KEY` (preferred) and `OPENAI_API_KEY`.
-
-After setup, preflight is silent and `/watch` just works. The check is a sub-100ms lookup, so it doesn't slow you down on subsequent runs.
-
-## Bring your own keys
-
-Captions cover the majority of public videos for free. The Whisper fallback only kicks in when a video genuinely has no caption track — typically local files, TikToks, some Vimeos, and the occasional caption-less YouTube upload.
-
-| Capability | What you need | Cost |
-|------------|---------------|------|
-| Download + native captions | `yt-dlp` + `ffmpeg` | Free |
-| Whisper fallback (preferred) | [Groq API key](https://console.groq.com/keys) — `whisper-large-v3` | Cheap, fast |
-| Whisper fallback (alt) | [OpenAI API key](https://platform.openai.com/api-keys) — `whisper-1` | Standard pricing |
-| Disable Whisper entirely | `--no-whisper` | Free, frames-only when no captions |
+**Data governance:** audio (never the video) is uploaded to Groq and OpenAI for transcription. Confirm that fits your IRB / data-management plan before running human-subjects recordings.
 
 ## Usage
 
 ```
-/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?
-/watch https://www.tiktok.com/@user/video/123 summarize this
-/watch ~/Movies/screen-recording.mp4 when does the UI break?
-/watch https://vimeo.com/123 what tools does she mention?
+/interview ~/Interviews/bei_017.mp4          # one recording
+/interview ~/Interviews/wave2/               # folder — every file, then a corpus summary
 ```
 
-Focused on a specific section — denser frame budget, lower token cost:
-```
-/watch https://youtu.be/abc --start 2:15 --end 2:45
-/watch video.mp4 --start 50 --end 60
-/watch "$URL" --start 1:12:00            # from 1h12m to end
-```
+- **Local files first** (`.mp4/.mov/.mkv/.webm`, plus audio-only `.m4a/.wav/.mp3/…` — the frame pass is skipped and noted). URLs work through `yt-dlp` for non-sensitive material.
+- **Batch mode** processes each file into its own artifact pair and names any file that fails, so nothing silently vanishes from the corpus count.
+- **Two-speaker with anomaly handling** by default; a third voice or crosstalk lands as `OTHER`, not a misattribution.
 
-Other knobs (passed to `scripts/watch.py`):
+Under the hood the skill runs `scripts/interview.py` stages — `preflight`, `transcribe`, `finalize`, `concordance`, `validate-flags`, `frames`, `render`, `discover`, `corpus-summary` — exchanging JSON judgment files through the work dir. You invoke `/interview`; the skill orchestrates them.
 
-- `--detail transcript|efficient|balanced|token-burner` — fidelity/speed dial. `transcript` skips frames (transcript only); `efficient` uses fast keyframes (cap 50); `balanced` uses scene-aware frames (cap 100); `token-burner` is scene-aware and uncapped.
-- `--timestamps T1,T2,…` — grab a frame at each absolute timestamp (`SS`/`MM:SS`/`HH:MM:SS`). Claude reads the transcript first, then targets the moments the presenter flags ("look here", "as you can see"). Added on top of the detail frames (reserved against the cap); out-of-window cues are dropped in focus mode; with `--detail transcript` these become the only frames.
-- `--max-frames N` — lower the frame cap for a tighter token budget.
-- `--resolution W` — bump frame width to 1024 px when Claude needs to read on-screen text (slides, terminals, code).
-- `--fps F` — override the auto-fps calculation (still capped at 2 fps).
-- `--whisper groq|openai` — force a specific Whisper backend.
-- `--no-whisper` — disable transcription entirely; frames only.
-- `--no-dedup` — keep near-duplicate frames. By default a frame-delta pass drops frames that are visually near-identical to the one before them (held slides, static screen recordings, paused video), so the frame budget is spent on distinct content; this flag turns that off.
-- `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
+## Also included: /watch
 
-## Limits
-
-- **Long-video accuracy depends on the detail mode.** On the capped modes (`efficient`, default `balanced`) coverage thins out past ~10 minutes — the frame cap spreads across the whole clip, so the script prints a "sparse scan" warning and you're better off re-running focused with `--start`/`--end`. `token-burner` lifts the cap and keeps *every* scene-change frame across the full video, so it stays complete on longer clips at the cost of more image tokens. The 10-minute mark is guidance for the capped modes, not a hard ceiling.
-- **Detail is one dial.** Defaults are balanced: scene-aware frames, 2 fps max, 100-frame cap. Use `--detail efficient` for a fast 50-frame keyframe pass, or `--detail token-burner` for uncapped scene candidates. Set `WATCH_DETAIL` in `~/.config/watch/.env` to change the default.
-
-## /interview (fork addition)
-
-Ingests a social-science interview recording (or a folder of them) and produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags. Audio goes to both Groq (`whisper-large-v3`) and OpenAI (`whisper-1`); the two transcripts are word-level diffed and every disagreement is adjudicated by Claude with a logged rationale — a full audit trail. A 3-analyst panel of independent subagents then labels every turn INTERVIEWER / INTERVIEWEE / OTHER with a concordance score, and INTERVIEWEE turns are coded against a versioned narrative-gravity codebook, pulling targeted frame evidence for video around each flagged moment.
-
-Artifacts land next to the media in `<stem>_interview/`: `transcript.docx` (speaker-labeled transcript, flags as anchored Word comments) and `sidecar.json` (segments, adjudication log, flags with evidence, concordance scores) — persistent research data, not temp files. The work directory is retained as the audit trail, not cleaned up.
-
-```
-/interview ~/Interviews/bei_017.mp4
-/interview ~/Interviews/          # folder batch mode — processes every file, then a corpus summary
-```
-
-Requires both `GROQ_API_KEY` and `OPENAI_API_KEY` for the dual-engine claim; a single key still runs, but every artifact is marked "single-engine UNVERIFIED". The tool never claims the transcript is error-free — the honest claim is "dual-engine verified with logged adjudication" (or a degraded variant), and partial transcription failures mark the record INCOMPLETE.
-
-Construct definitions live in `skills/interview/scripts/codebook.json`. Spec: [github.com/Jerrymwolf/gravitas/issues/1](https://github.com/Jerrymwolf/gravitas/issues/1).
+The upstream `/watch` skill ships here unchanged — it gives an agent a general video input (paste a URL or path, ask a question; it pulls captions or Whisper-transcribes, extracts scene-aware frames, and answers grounded in what's on screen). Gravitas doesn't modify it, so it keeps working for everyday video Q&A and upstream fixes merge cleanly. Full `/watch` documentation lives at the [upstream repo](https://github.com/bradautomates/claude-video).
 
 ## Structure
 
 ```
 .
-├── skills/watch/                 # self-contained skill — copied as a unit by every installer
-│   ├── SKILL.md                  # skill contract — the source of truth across all surfaces
-│   └── scripts/
-│       ├── watch.py              # entry point — orchestrates download → frames → transcript
-│       ├── download.py           # yt-dlp wrapper
-│       ├── frames.py             # ffmpeg frame extraction + auto-fps logic
-│       ├── transcribe.py         # VTT parsing + dedupe + Whisper orchestration
-│       ├── whisper.py            # Groq / OpenAI clients (pure stdlib)
-│       ├── config.py             # shared config (~/.config/watch/.env)
-│       ├── setup.py              # preflight + installer
-│       └── build-skill.sh        # build dist/watch.skill for claude.ai upload (dev-only)
-├── hooks/                        # SessionStart status hook (Claude Code only)
-├── .claude-plugin/               # plugin.json + marketplace.json (Claude Code)
-├── .codex-plugin/                # plugin.json — Codex/agents manifest ("skills": "./skills/")
-├── .agents/plugins/              # marketplace.json — Agent Skills marketplace listing
-├── AGENTS.md → CLAUDE.md         # generic-agent entry point
+├── skills/
+│   ├── interview/                # Gravitas — the product
+│   │   ├── SKILL.md              # the contract Claude reads on /interview
+│   │   └── scripts/
+│   │       ├── interview.py      # CLI orchestrator — one subcommand per pipeline stage
+│   │       ├── dual_transcribe.py# dual-engine transcription + word-level diff + adjudication apply
+│   │       ├── analyze.py        # diarization units, panel concordance, flag validation, frame bursts
+│   │       ├── render.py         # OOXML .docx (anchored comments) + JSON sidecar
+│   │       ├── stt.py            # Whisper client (verbatim copy of watch's whisper.py)
+│   │       ├── framegrab.py      # timestamp-pinned frame extraction (subset copy of watch's frames.py)
+│   │       └── codebook.json     # the versioned narrative-gravity construct
+│   └── watch/                    # upstream skill — unchanged (see "Also included")
 ├── tests/                        # pytest suite (ffmpeg-synthesized clips, no network)
-└── .github/workflows/            # release.yml — auto-builds watch.skill on tag push
+├── CLAUDE.md → AGENTS.md         # generic-agent entry point
+└── docs/                         # implementation plan (spec: issue #1)
 ```
 
 ## Develop
 
 ```bash
-# Run the test suite (stdlib + pytest; ffmpeg required for frame tests):
-python3 -m pytest -q
-
-# Build the claude.ai upload bundle:
-bash skills/watch/scripts/build-skill.sh      # → dist/watch.skill
+python3 -m pytest -q              # full suite (interview + upstream watch), no network
 ```
 
-Releasing: tag `vX.Y.Z`, push the tag. The workflow builds `dist/watch.skill` and attaches it to the GitHub release. Keep the version in sync across `skills/watch/SKILL.md`, `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`.
+The interview scripts stay self-contained — `stt.py` / `framegrab.py` are deliberate copies of watch's `whisper.py` / `frames.py` (kept byte-close so upstream diffs stay legible), never cross-imported. The pure cores (diff, concordance, renderer) are unit-tested in isolation; the LLM judgment lives in `SKILL.md` and is accountable through the retained artifacts, not assertions.
 
-See [CHANGELOG.md](CHANGELOG.md) for version history.
+## Credits & license
 
-## Open source
-
-MIT license.
-
-Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via [Groq](https://groq.com) or [OpenAI](https://openai.com).
-
-Built by Brad Bonanno — I make content about building with AI on [YouTube (@bradbonanno)](https://www.youtube.com/@bradbonanno), and build AI operating systems for businesses at [Solaris Automation](https://www.solarisautomation.io/). If `/watch` saves you from scrubbing through a video, come say hi on the channel.
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=bradautomates%2Fclaude-video&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=bradautomates/claude-video&type=date&legend=top-left" />
- </picture>
-</a>
-
----
-
-[github.com/bradautomates/claude-video](https://github.com/bradautomates/claude-video) · [@bradbonanno](https://www.youtube.com/@bradbonanno) · [Solaris Automation](https://www.solarisautomation.io/) · [LICENSE](LICENSE)
+MIT. Fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video) by Brad Bonanno — the `/watch` skill, the Whisper client, and the ffmpeg plumbing Gravitas builds on are his. Whisper transcription via [Groq](https://groq.com) and [OpenAI](https://openai.com).
