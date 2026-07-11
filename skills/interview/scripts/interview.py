@@ -28,6 +28,46 @@ MEDIA_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".wav", ".mp3", ".aac", "
 AUDIO_ONLY_EXTS = {".m4a", ".wav", ".mp3", ".aac", ".flac"}
 CODEBOOK_PATH = Path(__file__).resolve().parent / "codebook.json"
 
+# Keys live in the same file /watch uses, so a machine with either skill shares
+# one config. stt.load_api_key reads this path (plus env and ./.env).
+CONFIG_DIR = Path.home() / ".config" / "watch"
+CONFIG_FILE = CONFIG_DIR / ".env"
+GROQ_KEYS_URL = "https://console.groq.com/keys"
+OPENAI_KEYS_URL = "https://platform.openai.com/api-keys"
+
+ENV_TEMPLATE = """\
+# Whisper API keys for Gravitas (/interview) and /watch.
+#
+# Gravitas transcribes every interview with BOTH engines and diffs them — that
+# dual-engine cross-check is the tool's core accuracy guarantee, so you supply
+# YOUR OWN key for each. They are not bundled and never shared.
+#
+#   Groq   (whisper-large-v3):  https://console.groq.com/keys       (free tier)
+#   OpenAI (whisper-1):         https://platform.openai.com/api-keys (paid, ~$0.04/interview-hour)
+#
+# Both keys -> "dual-engine verified with logged adjudication". One key still
+# runs the full pipeline, but every artifact is honestly marked
+# "single-engine UNVERIFIED". Paste each key after its = sign, no quotes.
+
+GROQ_API_KEY=
+OPENAI_API_KEY=
+"""
+
+
+def scaffold_env_file(path: Path, template: str) -> bool:
+    """Create the key file with placeholders if absent; never clobber existing
+    keys. Returns True if it created the file. Opened O_CREAT|O_EXCL at 0600 so
+    the file is owner-only from birth and an existing file is never truncated,
+    even under a race (this file will later hold API-key secrets)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(template)
+    return True
+
 
 def out_dirs(media: Path, out_override: str | None) -> tuple[Path, Path]:
     base = Path(out_override) if out_override else media.parent / f"{media.stem}_interview"
@@ -45,6 +85,55 @@ def _save(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def cmd_setup(args) -> int:
+    """Guided key setup: scaffold the .env, report which keys are present, and
+    point the user at the Groq/OpenAI signup pages (--open launches them)."""
+    created = scaffold_env_file(CONFIG_FILE, ENV_TEMPLATE)
+    _, groq = stt.load_api_key(preferred="groq")
+    _, openai = stt.load_api_key(preferred="openai")
+
+    print("Gravitas setup — Whisper API keys")
+    print(f"  key file: {CONFIG_FILE}"
+          + ("  (created with placeholders)" if created else "  (already present — left untouched)"))
+    print(f"  Groq key:   {'present' if groq else 'MISSING'}")
+    print(f"  OpenAI key: {'present' if openai else 'MISSING'}")
+
+    if groq and openai:
+        print("  Ready: dual-engine verified transcription.")
+    elif groq or openai:
+        have, need, url = (
+            ("Groq", "OpenAI", OPENAI_KEYS_URL) if groq else ("OpenAI", "Groq", GROQ_KEYS_URL)
+        )
+        print(f"  One key present ({have}). The pipeline runs as SINGLE-ENGINE UNVERIFIED.")
+        print(f"  Add the {need} key for dual-engine verification: {url}")
+    else:
+        print("  You supply your own keys — Gravitas does not bundle or share them.")
+        print(f"    1. Groq key (free tier):  {GROQ_KEYS_URL}")
+        print(f"    2. OpenAI key (paid):     {OPENAI_KEYS_URL}")
+        print(f"    3. Paste each key into:   {CONFIG_FILE}")
+        print("  Then re-run:  interview.py preflight")
+
+    if getattr(args, "open", False):
+        import webbrowser
+        wanted = [u for u, missing in (
+            (GROQ_KEYS_URL, not groq), (OPENAI_KEYS_URL, not openai),
+        ) if missing]
+        opened = 0
+        for u in wanted:
+            try:
+                if webbrowser.open(u):
+                    opened += 1
+            except Exception:  # headless / odd BROWSER= — --open is best-effort
+                pass
+        if not wanted:
+            print("  All keys already present — nothing to open.")
+        elif opened:
+            print(f"  Opened {opened} signup page(s) in your browser.")
+        else:
+            print("  Could not open a browser here — visit the URLs above manually.")
+    return 0
 
 
 def cmd_preflight(args) -> int:
@@ -331,6 +420,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("preflight")
+    p = sub.add_parser("setup"); p.add_argument("--open", action="store_true")
     p = sub.add_parser("discover"); p.add_argument("folder")
     p = sub.add_parser("transcribe"); p.add_argument("media"); p.add_argument("--out-dir")
     p = sub.add_parser("finalize"); p.add_argument("--work", required=True); p.add_argument("--unit", choices=["segment", "gap"], default="segment")
@@ -342,7 +432,7 @@ def main() -> int:
 
     args = parser.parse_args()
     handlers = {
-        "preflight": cmd_preflight, "discover": cmd_discover,
+        "preflight": cmd_preflight, "setup": cmd_setup, "discover": cmd_discover,
         "transcribe": cmd_transcribe, "finalize": cmd_finalize,
         "concordance": cmd_concordance, "validate-flags": cmd_validate_flags,
         "frames": cmd_frames, "render": cmd_render,

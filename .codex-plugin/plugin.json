@@ -1,43 +1,42 @@
 {
-  "name": "watch",
-  "version": "0.2.0",
-  "description": "Let Claude watch a video. Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls captions or falls back to Whisper, and hands frames + transcript to Claude so it can answer questions about the video.",
+  "name": "gravitas",
+  "version": "0.1.0",
+  "description": "Interview transcription that measures narrative gravity. The /interview skill turns a social-science interview into a dual-engine verified, speaker-diarized transcript with narrative-gravity flags (.docx + JSON sidecar). Bundles the upstream /watch video skill unchanged.",
   "author": {
-    "name": "Bradley Bonanno"
+    "name": "Jeremiah Wolf"
   },
-  "homepage": "https://github.com/bradautomates/claude-video",
-  "repository": "https://github.com/bradautomates/claude-video",
+  "homepage": "https://github.com/Jerrymwolf/gravitas",
+  "repository": "https://github.com/Jerrymwolf/gravitas",
   "license": "MIT",
   "keywords": [
-    "video",
-    "watch",
-    "youtube",
-    "vimeo",
-    "tiktok",
+    "interview",
     "transcription",
+    "diarization",
+    "qualitative-research",
+    "narrative-gravity",
     "whisper",
-    "yt-dlp",
+    "bei",
     "ffmpeg",
-    "multimodal",
-    "frames"
+    "watch",
+    "video"
   ],
   "skills": "./skills/",
   "interface": {
-    "displayName": "watch",
-    "shortDescription": "Give Claude a video input — paste a URL or path and ask about it.",
-    "longDescription": "watch adds a skill that lets the agent watch any video: it downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls a timestamped transcript from native captions (or the Whisper API as a fallback), and hands frames + transcript to the model so it can answer questions grounded in what's actually on screen and in the audio.",
-    "developerName": "Bradley Bonanno",
+    "displayName": "Gravitas",
+    "shortDescription": "Interview transcription that measures narrative gravity.",
+    "longDescription": "Gravitas ingests a social-science interview recording (or a folder of them) and produces a dual-engine verified, speaker-diarized transcript with moments of narrative gravity — emotional displays, repetitions, quoted speech, temporal shifts — flagged against a versioned codebook with frame evidence. Output is a Word transcript with anchored comments plus a machine-readable JSON sidecar. Bundles the upstream /watch video skill unchanged.",
+    "developerName": "Jeremiah Wolf",
     "category": "Productivity",
     "capabilities": [
       "Interactive",
       "Read"
     ],
-    "websiteURL": "https://github.com/bradautomates/claude-video",
+    "websiteURL": "https://github.com/Jerrymwolf/gravitas",
     "defaultPrompt": [
-      "/watch https://youtu.be/dQw4w9WgXcQ what happens at the 30 second mark?",
-      "/watch ~/Movies/screen-recording.mp4 when does the UI break?",
-      "/watch https://youtu.be/<long-talk> summarize this"
+      "/interview ~/Interviews/bei_017.mp4",
+      "/interview ~/Interviews/wave2/",
+      "/watch https://youtu.be/<id> summarize this"
     ],
-    "brandColor": "#E11D48"
+    "brandColor": "#4C1D95"
   }
 }

@@ -29,9 +29,9 @@ Agent Skills package that gives an agent a video input. Installable across Claud
 
 | Surface | Install |
 |---------|---------|
-| Claude Code | `/plugin marketplace add bradautomates/claude-video` then `/plugin install watch@claude-video` |
-| Codex / Cursor / Copilot / +50 | `npx skills add bradautomates/claude-video -g` |
-| claude.ai (web) | upload `dist/watch.skill` (built by `skills/watch/scripts/build-skill.sh`) |
+| Claude Code | `/plugin marketplace add Jerrymwolf/gravitas` then `/plugin install gravitas@gravitas` (bundles `/interview` + upstream `/watch`) |
+| Codex / Cursor / Copilot / +50 | `npx skills add Jerrymwolf/gravitas -g` |
+| claude.ai (web) | upload `dist/watch.skill` (built by `skills/watch/scripts/build-skill.sh`) — upstream `/watch` only |
 
 ## Commands
 
@@ -48,6 +48,6 @@ bash skills/watch/scripts/build-skill.sh   # → dist/watch.skill
 
 ## Rules
 
-- Keep the version in sync across `skills/watch/SKILL.md` and `skills/interview/SKILL.md` (frontmatter), `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json` when cutting a release.
+- Two independent version lines. The **Gravitas product** versions together: `skills/interview/SKILL.md` (frontmatter), `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json` (currently `0.1.0`). The upstream **`/watch` skill** keeps its own upstream version in `skills/watch/SKILL.md` (currently `0.2.0`) — do NOT drag it to match the plugin version; it stays byte-close to upstream. Bump each line only when its own contents change.
 - Releasing: tag `vX.Y.Z` and push the tag; `.github/workflows/release.yml` builds `dist/watch.skill` and attaches it to the GitHub release.
 - Never commit real API keys or `.env` contents; keys live in `~/.config/watch/.env` (mode `0600`) at runtime.

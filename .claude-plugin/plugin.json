@@ -1,12 +1,12 @@
 {
-  "name": "watch",
-  "version": "0.2.0",
-  "description": "Let Claude watch a video. Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls captions or falls back to Whisper, and hands frames + transcript to Claude so it can answer questions about the video.",
+  "name": "gravitas",
+  "version": "0.1.0",
+  "description": "Interview transcription that measures narrative gravity. The /interview skill turns a social-science interview into a dual-engine verified, speaker-diarized transcript with narrative-gravity flags (.docx + JSON sidecar). Bundles the upstream /watch video skill unchanged.",
   "author": {
-    "name": "Bradley Bonanno"
+    "name": "Jeremiah Wolf"
   },
-  "homepage": "https://github.com/bradautomates/claude-video",
-  "repository": "https://github.com/bradautomates/claude-video",
+  "homepage": "https://github.com/Jerrymwolf/gravitas",
+  "repository": "https://github.com/Jerrymwolf/gravitas",
   "license": "MIT",
-  "keywords": ["video", "watch", "youtube", "vimeo", "tiktok", "transcription", "whisper", "yt-dlp", "ffmpeg", "multimodal", "frames"]
+  "keywords": ["interview", "transcription", "diarization", "qualitative-research", "narrative-gravity", "whisper", "bei", "ffmpeg", "watch", "video"]
 }

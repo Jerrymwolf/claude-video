@@ -1,21 +1,21 @@
 {
-  "name": "claude-video",
+  "name": "gravitas",
   "metadata": {
-    "description": "Give Claude a video input. /watch downloads, extracts frames, transcribes, and hands it all to Claude."
+    "description": "Interview transcription that measures narrative gravity — dual-engine verified transcripts, panel diarization, gravity-coded moments with frame evidence."
   },
   "owner": {
-    "name": "Bradley Bonanno"
+    "name": "Jeremiah Wolf"
   },
   "plugins": [
     {
-      "name": "watch",
-      "description": "Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes via captions or Whisper.",
+      "name": "gravitas",
+      "description": "Ingest a social-science interview (or a folder) into a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Bundles the upstream /watch video skill unchanged.",
       "author": {
-        "name": "Bradley Bonanno"
+        "name": "Jeremiah Wolf"
       },
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/bradautomates/claude-video"
+      "homepage": "https://github.com/Jerrymwolf/gravitas"
     }
   ]
 }

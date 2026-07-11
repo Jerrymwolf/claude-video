@@ -47,11 +47,17 @@ python3 "${SKILL_DIR}/scripts/interview.py" preflight
 Prints a JSON status (`binaries_ok`, `missing_binaries`, `groq_key`, `openai_key`, `dual_ok`) and exits:
 
 - **Exit 0 with `dual_ok: true`** → both engines available. Proceed silently.
-- **Exit 0 with `dual_ok: false`** (exactly one key present) → the pipeline runs, but EVERY artifact and report will carry **"single-engine UNVERIFIED"**. Warn the user BEFORE transcribing and offer (via `AskUserQuestion`) to add the missing `GROQ_API_KEY` (console.groq.com/keys) or `OPENAI_API_KEY` (platform.openai.com/api-keys) to `~/.config/watch/.env`. If they decline, proceed single-engine — never silently.
+- **Exit 0 with `dual_ok: false`** (exactly one key present) → the pipeline runs, but EVERY artifact and report will carry **"single-engine UNVERIFIED"**. Warn the user BEFORE transcribing and offer (via `AskUserQuestion`) to add the missing key. If they accept, run `setup` (below) and point them at the missing engine's signup page. If they decline, proceed single-engine — never silently.
 - **Exit 2** → `ffmpeg`/`ffprobe` missing. Give the user the install command printed on stderr (`brew install ffmpeg` on macOS) and stop until it's installed.
-- **Exit 3** → no API keys at all. Help the user add at least one key to `~/.config/watch/.env` (same file `/watch` uses), then re-run preflight. Without any key the pipeline cannot run — stop.
+- **Exit 3** → no API keys at all. Run the guided setup, which scaffolds the key file and prints where to get each key:
 
-Keys are read from the environment first, then `~/.config/watch/.env`, then `./.env`.
+  ```bash
+  python3 "${SKILL_DIR}/scripts/interview.py" setup
+  ```
+
+  **The user must supply their own keys — Gravitas does not bundle or share them.** Groq (`whisper-large-v3`) has a free tier at console.groq.com/keys; OpenAI (`whisper-1`) is paid at platform.openai.com/api-keys (~$0.04 per interview-hour). Offer via `AskUserQuestion` to open both signup pages in the browser — if they accept, run `setup --open`. Then have them paste each key into `~/.config/watch/.env`, re-run `preflight`, and only proceed once at least one key is present (both, for the dual-engine claim). Without any key the pipeline cannot run — stop.
+
+Keys are read from the environment first, then `~/.config/watch/.env`, then `./.env`. On the very first `/interview` of a session, if `preflight` exits 3 (or `dual_ok` is false), run `setup` before anything else.
 
 ## Step 1 — Resolve input
 

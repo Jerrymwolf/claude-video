@@ -1,14 +1,14 @@
 {
-  "name": "claude-video",
+  "name": "gravitas",
   "interface": {
-    "displayName": "watch"
+    "displayName": "Gravitas"
   },
   "plugins": [
     {
-      "name": "watch",
+      "name": "gravitas",
       "source": {
         "source": "url",
-        "url": "https://github.com/bradautomates/claude-video.git"
+        "url": "https://github.com/Jerrymwolf/gravitas.git"
       },
       "policy": {
         "installation": "AVAILABLE",

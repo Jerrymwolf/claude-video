@@ -71,24 +71,46 @@ Accepted, on-the-record limits: the diff can't catch an error both engines make 
 
 Gravitas is the `skills/interview/` skill. It's self-contained (pure-stdlib Python over `ffmpeg`; `yt-dlp` only for URL sources), so it installs as a folder.
 
-**Claude Code (symlink the working tree):**
+**Claude Code — plugin marketplace (auto-updates):**
+```
+/plugin marketplace add Jerrymwolf/gravitas
+/plugin install gravitas@gravitas
+```
+Bundles both `/interview` (Gravitas) and the upstream `/watch` skill.
+
+**Claude Code — symlink the working tree (dev):**
 ```bash
 git clone https://github.com/Jerrymwolf/gravitas.git
 ln -s "$(pwd)/gravitas/skills/interview" ~/.claude/skills/interview
 ```
 
-**Any Agent Skills host (Codex, Cursor, Gemini CLI, …):** point your host's skill loader at `skills/interview/` — `SKILL.md` and its `scripts/` copy as one unit and resolve their own paths on any host.
+**Codex, Cursor, Gemini CLI, +50 other hosts:**
+```bash
+npx skills add Jerrymwolf/gravitas -g       # add -l to list first, -a <host> to target one
+```
+Discovers skills by their `SKILL.md` — `SKILL.md` and its `scripts/` copy as one unit and resolve their own paths on any host.
 
-## Setup
+## Setup — you bring your own API keys
 
-The first run's `preflight` checks for `ffmpeg`/`ffprobe` and both Whisper keys. Put them in `~/.config/watch/.env` (mode `0600`):
+**Gravitas does not bundle or share keys — you supply your own.** It transcribes every interview with *both* engines and diffs them, so the dual-engine claim needs a key for each:
+
+- **Groq** (`whisper-large-v3`) — free tier at [console.groq.com/keys](https://console.groq.com/keys)
+- **OpenAI** (`whisper-1`) — paid at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) (~$0.04 per interview-hour)
+
+Run the guided setup — it creates the key file (mode `0600`), reports what's missing, and points you at each signup page:
+
+```bash
+python3 skills/interview/scripts/interview.py setup          # add --open to launch the pages in your browser
+```
+
+Then paste each key into `~/.config/watch/.env` (the same file `/watch` uses):
 
 ```
-GROQ_API_KEY=...      # console.groq.com/keys — whisper-large-v3
-OPENAI_API_KEY=...    # platform.openai.com/api-keys — whisper-1
+GROQ_API_KEY=...
+OPENAI_API_KEY=...
 ```
 
-Both keys unlock the dual-engine verification. A single key still runs the whole pipeline, but every artifact is honestly marked `single-engine UNVERIFIED`. Cost is small — a 7-minute interview transcribes on both engines for well under a dime.
+On first run, if no keys are found, the skill runs `setup` for you, offers to open the signup pages, then waits while you paste the keys in before continuing. Both keys unlock dual-engine verification; a single key still runs the whole pipeline, but every artifact is honestly marked `single-engine UNVERIFIED`. Cost is small — a 7-minute interview transcribes on both engines for well under a dime.
 
 **Data governance:** audio (never the video) is uploaded to Groq and OpenAI for transcription. Confirm that fits your IRB / data-management plan before running human-subjects recordings.
 
@@ -103,7 +125,7 @@ Both keys unlock the dual-engine verification. A single key still runs the whole
 - **Batch mode** processes each file into its own artifact pair and names any file that fails, so nothing silently vanishes from the corpus count.
 - **Two-speaker with anomaly handling** by default; a third voice or crosstalk lands as `OTHER`, not a misattribution.
 
-Under the hood the skill runs `scripts/interview.py` stages — `preflight`, `transcribe`, `finalize`, `concordance`, `validate-flags`, `frames`, `render`, `discover`, `corpus-summary` — exchanging JSON judgment files through the work dir. You invoke `/interview`; the skill orchestrates them.
+Under the hood the skill runs `scripts/interview.py` stages — `setup`, `preflight`, `transcribe`, `finalize`, `concordance`, `validate-flags`, `frames`, `render`, `discover`, `corpus-summary` — exchanging JSON judgment files through the work dir. You invoke `/interview`; the skill orchestrates them.
 
 ## Also included: /watch
 
