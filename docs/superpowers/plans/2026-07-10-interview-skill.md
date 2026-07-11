@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a self-contained `skills/interview/` skill that ingests social-science interview recordings and produces a dual-engine-verified, speaker-diarized transcript with narrative-gravity flags — as a .docx with anchored comments plus a JSON sidecar. Spec: https://github.com/Jerrymwolf/claude-video/issues/1
+**Goal:** Add a self-contained `skills/interview/` skill that ingests social-science interview recordings and produces a dual-engine-verified, speaker-diarized transcript with narrative-gravity flags — as a .docx with anchored comments plus a JSON sidecar. Spec: https://github.com/Jerrymwolf/gravitas/issues/1
 
 **Architecture:** Deterministic pure-stdlib Python does everything mechanical (dual Whisper transcription, word-level diff, concordance math, frame bursts, OOXML rendering); all LLM judgment (diff adjudication, 3-analyst diarization panel, gravity codebook pass) lives in SKILL.md as Claude workflow steps that exchange JSON files with the scripts through a per-interview work directory. The skill folder is fully self-contained per AGENTS.md: the Whisper client and frame helpers are *copied* from `skills/watch/` under non-colliding module names (`stt.py`, `framegrab.py`), never imported across skill folders.
 
@@ -1603,7 +1603,7 @@ version: "0.1.0"
 description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
 argument-hint: "<media-file-or-folder> [notes]"
 allowed-tools: Bash, Read, Write, Agent, AskUserQuestion
-homepage: https://github.com/Jerrymwolf/claude-video
+homepage: https://github.com/Jerrymwolf/gravitas
 license: MIT
 user-invocable: true
 ---

@@ -1,3 +1,9 @@
+# Gravitas
+
+**Interview transcription that measures narrative gravity.** Gravitas ingests social-science interview recordings and produces dual-engine verified, speaker-diarized transcripts with moments of narrative gravity — emotional displays, repetitions, quoted speech, temporal shifts — flagged against a versioned codebook, with frame evidence. A fork of [bradautomates/claude-video](https://github.com/bradautomates/claude-video), whose `/watch` skill ships here unchanged. Gravitas itself is the [`/interview` skill](#interview-fork-addition) — spec in [issue #1](https://github.com/Jerrymwolf/gravitas/issues/1).
+
+---
+
 # /watch
 
 **Give Claude the ability to watch any video.**
@@ -218,7 +224,7 @@ Artifacts land next to the media in `<stem>_interview/`: `transcript.docx` (spea
 
 Requires both `GROQ_API_KEY` and `OPENAI_API_KEY` for the dual-engine claim; a single key still runs, but every artifact is marked "single-engine UNVERIFIED". The tool never claims the transcript is error-free — the honest claim is "dual-engine verified with logged adjudication" (or a degraded variant), and partial transcription failures mark the record INCOMPLETE.
 
-Construct definitions live in `skills/interview/scripts/codebook.json`. Spec: [github.com/Jerrymwolf/claude-video/issues/1](https://github.com/Jerrymwolf/claude-video/issues/1).
+Construct definitions live in `skills/interview/scripts/codebook.json`. Spec: [github.com/Jerrymwolf/gravitas/issues/1](https://github.com/Jerrymwolf/gravitas/issues/1).
 
 ## Structure
 

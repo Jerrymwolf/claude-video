@@ -4,7 +4,7 @@ version: "0.1.0"
 description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
 argument-hint: "<media-file-or-folder> [notes]"
 allowed-tools: Bash, Read, Write, Agent, AskUserQuestion
-homepage: https://github.com/Jerrymwolf/claude-video
+homepage: https://github.com/Jerrymwolf/gravitas
 license: MIT
 user-invocable: true
 ---

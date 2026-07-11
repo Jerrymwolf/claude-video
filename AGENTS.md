@@ -1,4 +1,6 @@
-# claude-video / watch skill
+# Gravitas (fork of claude-video)
+
+This fork's product is **Gravitas** — the `skills/interview/` skill: interview transcription with narrative-gravity measurement. The upstream `skills/watch/` skill ships unchanged; everything below about watch is upstream documentation.
 
 Agent Skills package that gives an agent a video input. Installable across Claude Code (most common host), Codex, Cursor, GitHub Copilot, and 50+ other [Agent Skills](https://agentskills.io) hosts. Pure-stdlib Python that orchestrates `yt-dlp` + `ffmpeg` and an optional Whisper API.
 
