@@ -225,6 +225,25 @@ class TestDocx:
     def test_no_claim_means_no_accuracy_paragraph(self):
         assert "Accuracy:" not in build_docx_parts(TURNS, FLAGS)["word/document.xml"]
 
+    def test_speaker_names_override_labels(self):
+        names = {"INTERVIEWER": "Greg", "INTERVIEWEE": "Participant"}
+        doc = build_docx_parts(TURNS, FLAGS, names=names)["word/document.xml"]
+        assert "[00:00] Greg:" in doc
+        assert "[00:06] Participant:" in doc
+        assert "INTERVIEWER:" not in doc
+        assert "INTERVIEWEE:" not in doc
+
+    def test_unmapped_label_falls_back_to_role(self):
+        # only INTERVIEWEE renamed → INTERVIEWER keeps its canonical role label
+        doc = build_docx_parts(TURNS, FLAGS, names={"INTERVIEWEE": "Scott"})["word/document.xml"]
+        assert "[00:00] INTERVIEWER:" in doc
+        assert "[00:06] Scott:" in doc
+
+    def test_default_names_none_keeps_roles(self):
+        doc = build_docx_parts(TURNS, FLAGS)["word/document.xml"]
+        assert "[00:00] INTERVIEWER:" in doc
+        assert "[00:06] INTERVIEWEE:" in doc
+
 
 class TestSidecar:
     def _sidecar(self):
@@ -280,3 +299,18 @@ class TestSidecar:
 
     def test_sidecar_is_json_serializable(self):
         json.dumps(self._sidecar())
+
+    def test_speaker_names_recorded_when_provided(self):
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=TURNS, adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+            speaker_names={"INTERVIEWER": "Greg", "INTERVIEWEE": "Participant"},
+        )
+        assert sc["speaker_names"] == {"INTERVIEWER": "Greg", "INTERVIEWEE": "Participant"}
+        # the machine-readable research record keeps canonical role labels
+        assert sc["turns"][0]["label"] == "INTERVIEWER"
+
+    def test_speaker_names_absent_by_default(self):
+        assert "speaker_names" not in self._sidecar()

@@ -72,12 +72,18 @@ def _flag_comment_text(flag: dict) -> str:
     return " | ".join(bits)
 
 
-def _paragraph_for_turn(turn: dict, turn_flags: list[tuple[int, dict]]) -> str:
+def _paragraph_for_turn(
+    turn: dict, turn_flags: list[tuple[int, dict]], names: dict | None = None
+) -> str:
     """One <w:p> per turn. Flags whose quote is found in the turn text get a
     comment range around exactly that substring; unfindable quotes anchor the
     whole turn text. Flags are applied left-to-right; overlaps fall back to
-    whole-paragraph anchoring."""
-    header = _run(f"[{format_hms(turn['start'])}] {turn['label']}: ", bold=True)
+    whole-paragraph anchoring.
+
+    `names` maps a canonical role label (INTERVIEWER/INTERVIEWEE/OTHER/UNCLEAR)
+    to a display name for the speaker header; unmapped labels render verbatim."""
+    speaker = (names or {}).get(turn["label"], turn["label"])
+    header = _run(f"[{format_hms(turn['start'])}] {speaker}: ", bold=True)
     text = turn["text"]
 
     spans = []  # (pos, end, comment_id) — non-overlapping, sorted
@@ -123,6 +129,7 @@ def build_docx_parts(
     now: str | None = None,
     claim: str | None = None,
     notes: list[str] | None = None,
+    names: dict | None = None,
 ) -> dict[str, str]:
     """Pure: labeled turns + validated flags → {zip_name: xml_string}.
 
@@ -130,6 +137,10 @@ def build_docx_parts(
     paragraph per entry in `notes`) renders directly under the title — the
     .docx travels alone in document-based coding workflows, so the accuracy
     claim must live in both artifacts, not just the sidecar.
+
+    `names` maps canonical role labels (INTERVIEWER/INTERVIEWEE/OTHER/UNCLEAR)
+    to display names in the speaker headers; unmapped labels render verbatim,
+    so partial maps and `None` both stay backward-compatible.
 
     With no turns, flags still emit comment entries but anchor nowhere
     (orphaned in comments.xml) — callers should not render flag-bearing
@@ -171,7 +182,9 @@ def build_docx_parts(
         for note in notes or []:
             paragraphs.append("<w:p>" + _run(f"Note: {note}") + "</w:p>")
     for turn in turns:
-        paragraphs.append(_paragraph_for_turn(turn, flag_to_turn.get(turn["id"], [])))
+        paragraphs.append(
+            _paragraph_for_turn(turn, flag_to_turn.get(turn["id"], []), names)
+        )
 
     document = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -212,8 +225,13 @@ def build_sidecar(
     partial_failures: list[str],
     codebook_version: str,
     now: str | None = None,
+    speaker_names: dict | None = None,
 ) -> dict:
-    """Pure assembly of the machine-readable record. `now` injectable for tests."""
+    """Pure assembly of the machine-readable record. `now` injectable for tests.
+
+    `speaker_names` (role label → display name) is recorded verbatim when
+    non-empty so the artifact is self-describing, but `turns[].label` stays
+    canonical — the research record is role-based, names are a display layer."""
     dual = engines.get("groq") and engines.get("openai") and not any(
         ENGINE_SKIPPED in d or TRANSCRIPTION_FAILED in d for d in degradation
     )
@@ -224,7 +242,7 @@ def build_sidecar(
                  "INCOMPLETE — transcription gaps recorded")
     else:
         claim = "dual-engine verified with logged adjudication"
-    return {
+    sidecar = {
         "schema_version": "1.0",
         "interview": {
             "media": media,
@@ -240,3 +258,6 @@ def build_sidecar(
         "adjudications": adjudications,
         "flags": [dict(copy.deepcopy(f), codebook_version=codebook_version) for f in flags],
     }
+    if speaker_names:
+        sidecar["speaker_names"] = dict(speaker_names)
+    return sidecar

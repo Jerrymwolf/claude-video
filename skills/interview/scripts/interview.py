@@ -359,6 +359,14 @@ def cmd_render(args) -> int:
             engines["openai"] = "whisper-1"
 
     partial = list(diffed.get("partial_failures") or [])
+    # Optional display names for the two roles (+ OTHER/UNCLEAR). Canonical
+    # role labels stay in the sidecar record; names are a docx display layer.
+    names = {
+        role: getattr(args, attr)
+        for role, attr in (("INTERVIEWER", "interviewer"), ("INTERVIEWEE", "interviewee"),
+                           ("OTHER", "other"), ("UNCLEAR", "unclear"))
+        if getattr(args, attr, None)
+    } or None
     # Sidecar first: the docx carries the sidecar's accuracy claim, because
     # the .docx travels alone in document-based coding workflows.
     sidecar = build_sidecar(
@@ -367,6 +375,7 @@ def cmd_render(args) -> int:
         adjudications=audit, flags=flags,
         partial_failures=partial,
         codebook_version=codebook["codebook_version"],
+        speaker_names=names,
     )
     notes = degradation + (
         ["transcription gaps: " + "; ".join(partial)] if partial else []
@@ -379,7 +388,8 @@ def cmd_render(args) -> int:
         return 1
     display_turns = merge_labeled_turns(turns)
     docx_path = write_docx(
-        build_docx_parts(display_turns, flags, claim=sidecar["accuracy_claim"], notes=notes),
+        build_docx_parts(display_turns, flags, claim=sidecar["accuracy_claim"],
+                         notes=notes, names=names),
         base / "transcript.docx",
     )
     _save(base / "sidecar.json", sidecar)
@@ -428,6 +438,11 @@ def main() -> int:
     p = sub.add_parser("validate-flags"); p.add_argument("--work", required=True); p.add_argument("--duration")
     p = sub.add_parser("frames"); p.add_argument("media"); p.add_argument("--out-dir")
     p = sub.add_parser("render"); p.add_argument("media"); p.add_argument("--out-dir")
+    # Optional speaker display names (default: the canonical role labels).
+    p.add_argument("--interviewer", metavar="NAME", help="display name for INTERVIEWER turns")
+    p.add_argument("--interviewee", metavar="NAME", help="display name for INTERVIEWEE turns")
+    p.add_argument("--other", metavar="NAME", help="display name for OTHER turns")
+    p.add_argument("--unclear", metavar="NAME", help="display name for UNCLEAR turns")
     p = sub.add_parser("corpus-summary"); p.add_argument("folder")
 
     args = parser.parse_args()

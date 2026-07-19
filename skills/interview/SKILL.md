@@ -1,6 +1,6 @@
 ---
 name: interview
-version: "0.1.0"
+version: "0.2.0"
 description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
 argument-hint: "<media-file-or-folder> [notes]"
 allowed-tools: Bash, Read, Write, Agent, AskUserQuestion
@@ -202,6 +202,15 @@ Prints `DOCX:` and `SIDECAR:` paths and `CLAIM:` — the accuracy claim, exactly
 - `single-engine UNVERIFIED`
 
 The .docx is the speaker-labeled transcript with gravity flags anchored as comments; the sidecar is the full machine-readable record (segments, turns with concordance, adjudication audit log, flags with visual evidence, degradation, partial failures, codebook version).
+
+**Optional speaker names.** By default the .docx headers read `INTERVIEWER:` / `INTERVIEWEE:` (and `OTHER:` / `UNCLEAR:`). Pass display names to relabel them — useful when the dyad has known participants or the recording isn't a literal interview:
+
+```bash
+python3 "${SKILL_DIR}/scripts/interview.py" render "<media>" \
+  --interviewer "Interviewer" --interviewee "Participant"
+```
+
+`--other` and `--unclear` rename those labels too; any flag you omit keeps its canonical role label. This is a **display layer only** — the sidecar's `turns[].label` stays role-based (the research record), and the chosen names are recorded under a `speaker_names` key so the artifact is self-describing. Names are purely a render concern; re-run `render` with different names any time without re-transcribing. Note that a single INTERVIEWEE label covers whoever is in the interviewee role — in a multi-party recording (e.g. one host confronting several people) every non-host turn shares one name, so names fit true dyads best.
 
 ## Step 8 — Report to the user
 
