@@ -47,16 +47,44 @@ Two codebooks ship next to the scripts. A codebook is a versioned data file that
 
 The declared fields that change what the tool accepts: `coding_scope`, `affect_field`, `affect_vocabulary`, `enforce_attribution_gate`, `episode_schema`, `arc_schema`, and per-marker `requires_affect`. Read the chosen file fresh each run — never from memory.
 
-`--codebook PATH` selects an alternate codebook, and it exists on exactly three stages: `validate-episodes`, `validate-flags`, and `render`. **Pass the SAME `--codebook` to all three.** Each loads it independently and nothing cross-checks them: omitting it at `render` succeeds quietly and stamps `codebook_file: codebook.json` onto a record coded against a different codebook. Fix the literal path once, at Step 1, and reuse it verbatim. `corpus-summary` deliberately takes no `--codebook` — it counts what the sidecars themselves record.
+`--codebook PATH` selects an alternate codebook, and it exists on exactly three stages: `validate-episodes`, `validate-flags`, and `render`. **Pass the SAME `--codebook` to all three.** Each loads it independently. Two of the three are cross-checked: a successful `validate-flags` records the codebook it used, and `render` refuses (exit 1) when its own `--codebook` disagrees — omitting it at `render` on a moral-identity run is now an error, not a silent `codebook_file: codebook.json`. **`validate-episodes` is not cross-checked at all** — a wrong codebook there validates the episode layer against the wrong schema and nothing catches it. Fix the literal path once, at Step 1, and reuse it verbatim. `corpus-summary` deliberately takes no `--codebook` — it counts what the sidecars themselves record.
+
+### `work/codebook_ref.json` — the codebook provenance record
+
+A **successful** `validate-flags` writes `WORK_DIR/codebook_ref.json` — `{"codebook_file": "…", "codebook_version": "…"}` — naming the codebook that just accepted the flag set. A failing run writes nothing. `render` reads it and refuses to build a research record against a different codebook:
+
+```
+ERROR: codebook mismatch — <…>/work/codebook_ref.json records that validate-flags last accepted a flag set against codebook_moral_identity.json (1.0.0), but render resolved codebook.json (1.0.0). Re-run render with --codebook pointing at codebook_moral_identity.json, or re-run validate-flags with the codebook you mean and then render again.
+```
+
+Nothing is written on a refusal — no `transcript.docx`, no `sidecar.json`.
+
+- **Never hand-write or hand-edit it.** It is a machine-written attestation; editing it to silence a mismatch forges the record's provenance. The honest reset is to re-run `validate-flags` with the codebook you actually mean.
+- It attests to the **codebook only**, not to the current contents of `flags.json` — flags edited after a clean validate are not re-checked by render.
+- **No record → permissive.** A work dir created before this file existed still renders, unchecked.
+- **A structurally unusable record exits 2, not 1** — malformed JSON, or no usable `codebook_file`/`codebook_version` pair (missing, blank, or whitespace-only). That is broken input: nothing was cross-checked. Delete it and re-run `validate-flags`. A non-string `codebook_version` (a codebook declaring `2` rather than `"2"`) is legitimate and is cross-checked normally.
+- It lives in the work dir, which is the audit trail and is **never deleted** (see Retention).
 
 ## Exit codes
 
 At the judgment stages, `1` and `2` mean different things and must be handled differently:
 
 - **Exit 1 — a validation finding.** `validate-episodes` prints `INVALID EPISODES:`, `validate-flags` prints `INVALID FLAGS:`, one line per problem. Your judgment file is wrong; fix it per each printed line and re-run.
-- **Exit 2 — broken input.** A missing or malformed `episodes.json`, or a `--codebook` path that does not exist or is not a codebook. The message names the file and the exact spot — `ERROR: episodes.json: line 23 column 1 — Illegal trailing comma before end of array`. Nothing was validated. Fix the file or the path; do NOT report this as a finding. (`render --persona ""` is the same class and also exits 2.)
+- **Exit 1 — `CANNOT VALIDATE:`.** Same exit code, **different meaning and a different remedy.** From `validate-flags` only. It does not say your judgment file is wrong — it says an **earlier stage has not run**, so a check this stage promises could not be performed at all. Do NOT go re-examine your coding. Run the stage the line names, then re-run validate-flags. Both cases fire when `WORK_DIR/diarized.json` is absent, and they fire under **both** codebooks:
 
-**A crash is not a finding.** `preflight` predates this convention and keeps its own codes (see Step 0). The other hand-authored files — `adjudications.json`, `panel_*.json`, `flags.json` — are not yet routed through the exit-2 path: malformed JSON there surfaces as a raw Python traceback and **exits 1, the same code as a validation finding**, so the exit code alone cannot tell them apart — read the output. A traceback's last line still gives the line and column; re-read the file you just wrote. (One traceback is not about a malformed file at all: a `ValueError` from validate-flags means the stages were run out of order — see Step 6.) Never report a traceback as a research result.
+  ```
+  CANNOT VALIDATE:
+    work/diarized.json is absent, so the verbatim-quote check cannot run against 2 flag(s) carrying a quote (g0002, g0007) — run concordance, and validate-episodes if this run has an episode layer, before validate-flags
+  ```
+  ```
+  CANNOT VALIDATE:
+    codebook declares coding_scope/enforce_attribution_gate but no turns were supplied — turn-level validation cannot be skipped — work/diarized.json is absent; run concordance before validate-flags
+  ```
+
+  The first fires whenever any flag carries a `quote`; the second when the flag set has no quote to trip the first (an empty flag set) but the codebook declares `coding_scope`/`enforce_attribution_gate`. Remedy for both: `concordance` → `validate-episodes` (if this run has an episode layer) → `validate-flags`. Nothing was validated and no `codebook_ref.json` was written, so **never report the run as clean.**
+- **Exit 2 — broken input.** A missing or malformed `episodes.json`, a `--codebook` path that does not exist or is not a codebook, or a `work/codebook_ref.json` at render that is malformed or carries no usable `codebook_file`/`codebook_version` pair. The message names the file and the exact spot — `ERROR: episodes.json: line 23 column 1 — Illegal trailing comma before end of array`. Nothing was validated. Fix the file or the path; do NOT report this as a finding. (`render --persona ""` is the same class and also exits 2.)
+
+**A crash is not a finding.** `preflight` predates this convention and keeps its own codes (see Step 0). The other hand-authored files — `adjudications.json`, `panel_*.json`, `flags.json` — are not yet routed through the exit-2 path: malformed JSON there surfaces as a raw Python traceback and **exits 1, the same code as a validation finding**, so the exit code alone cannot tell them apart — read the output. A traceback's last line still gives the line and column; re-read the file you just wrote. (One traceback is not about a malformed file at all: a `ValueError: turns missing label/concordance (run concordance first): …` from validate-flags means `diarized.json` is **present but not yet labeled** — the stages were run out of order; see Step 6. An entirely *absent* `diarized.json` is the `CANNOT VALIDATE:` case above, not a traceback.) Never report a traceback as a research result.
 
 ## Step 0 — Preflight
 
@@ -304,12 +332,16 @@ python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR [--du
 OK: 9 flags valid against codebook 1.0.0 (codebook_moral_identity.json)
 ```
 
+That OK line is also when `WORK_DIR/codebook_ref.json` gets written, recording the codebook just named so `render` can refuse a different one. A rejected run writes no record — so a work dir with no `codebook_ref.json` has never had a flag set accepted in it.
+
+`WORK_DIR/diarized.json` must be present, or this stage refuses with `CANNOT VALIDATE:` (exit 1) rather than validating — see Exit codes.
+
 Validation gates the frame stage — never proceed past a failing validate.
 
 **When `WORK_DIR/episodes.json` exists**, this stage also reconciles the two layers and stamps `episode_id` onto every flag. Three refusals to know, all exit 1:
 
 - `N display turn(s) out of sync with episodes.json — re-run validate-episodes` — `episodes.json` was re-drawn after Step 5 stamped the turns (or Step 5 never ran). Re-run `validate-episodes`, then this stage. Do not hand-edit the stamps.
-- `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first. **You only see that sentence under the default codebook.** Under a codebook declaring `coding_scope`/`enforce_attribution_gate` — including the moral-identity one in the command above — the same stage order raises first, as a traceback ending `ValueError: turns missing label/concordance (run concordance first): t0001, …`. That traceback is the one case where the input file is fine and the **stage order** is wrong; the remedy is the same concordance → validate-episodes → validate-flags.
+- `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first. **You only see that sentence under the default codebook**, and only when `diarized.json` exists but its turns are not yet labeled (or the flag set is empty, so nothing tripped the quote check first). Under a codebook declaring `coding_scope`/`enforce_attribution_gate` — including the moral-identity one in the command above — that same present-but-unlabeled turn layer raises first, as a traceback ending `ValueError: turns missing label/concordance (run concordance first): t0001, …`. That traceback is the one case where the input file is fine and the **stage order** is wrong; the remedy is the same concordance → validate-episodes → validate-flags. A `diarized.json` that is **absent entirely** takes neither path under either codebook — it prints `CANNOT VALIDATE:` (see Exit codes).
 - The flag's own placement — `g0010: t_start 103.0 outside every episode` (its `t_start` fell in a legal gap, where turns may not start but flags evidently did) or `g0010: straddles episodes e01 → e02 (t_start 50.1, t_end 64.48); filed under e01` (a boundary runs through the flag; it is filed under its `t_start`'s episode anyway, and the disagreement is reported rather than resolved silently). Fix the timestamps, or the boundary, and re-run both stages.
 
 Those three are checked in order, and the first two are checked **before** flag placement: a run whose turn layer is out of sync reports drift and stops, so fix drift first and the placement errors — if any — surface on the next run.
@@ -349,15 +381,22 @@ Prints `DOCX:` and `SIDECAR:` paths and `CLAIM:` — the accuracy claim, exactly
 
 The .docx is the speaker-labeled transcript with coded flags anchored as comments. The sidecar is the full machine-readable record, **schema 1.1**: `interview` (media, duration, processed_at, and `persona` when given), `engines`, `accuracy_claim`, top-level `codebook_version` and `codebook_file`, `degradation`, `partial_failures`, `segments`, `turns` (with concordance, votes, and `episode_id` when the episode layer ran), `adjudications`, `flags` (with visual evidence and `episode_id`), plus `episodes` (the validated list, arcs included) when `episodes.json` exists and `speaker_names` when names were passed. `codebook_file` is always recorded, because which codebook produced the record is a fact about the record; both shipped codebooks are independently at version `1.0.0`, so the **filename**, not the version, is what carries identity.
 
-**The .docx is not the complete record — the sidecar is.** A Word comment carries the marker list, salience, time range, note, visual evidence and frame count only, under a hardcoded `GRAVITY [...]` heading:
+**The sidecar is still the complete record, but the .docx comment now carries most of the flag.** Under a hardcoded `GRAVITY [...]` heading it prints, in this order and omitting any segment the flag does not carry: marker list, `speaker:`, `attribution uncertain` (only when true), `episode:`, affect, `salience`, time range, note, visual evidence, frame count. Two real comment lines from a moral-identity render:
 
 ```
-GRAVITY [displacement_of_responsibility] | salience 4/5 | t=00:15-00:19 | frames: 5
+GRAVITY [displacement_of_responsibility] | speaker: INTERVIEWEE | episode: e01 | affect: frustration | salience 4/5 | t=00:15-00:19 | deflects to store policy | visual: corroborates — jaw set, gestures at the cart | frames: 5
+GRAVITY [diffusion_of_responsibility] | speaker: INTERVIEWEE | attribution uncertain | episode: e01 | affect: frustration | salience 4/5 | t=00:40-00:49 | visual: neutral — subject off-frame | frames: 5
 ```
 
-A codebook-declared affect field (`affect`), `speaker_role`, `episode_id`, and `attribution_uncertain` **do not appear there** — they are in the sidecar and nowhere else. Say so if you hand the .docx to a human coder for a moral-identity study, and never let a claim about affect, speaker, episode, or attribution be sourced from the .docx alone.
+The affect segment is **labelled by the field the flag actually carries** — `affect: frustration` for a moral-identity flag, `emotion: grief` for a narrative one — so the narrative .docx is unchanged from before:
 
-**Codebook (`--codebook PATH`).** Pass the SAME codebook you validated against. render loads it independently, and nothing cross-checks the two stages: omitting it here exits 0 and writes `codebook_file: codebook.json` onto a record coded against a different codebook — a corrupt research record with no error message. If you catch it after the fact, re-run render with the right `--codebook`; render is pure assembly and safe to repeat.
+```
+GRAVITY [emotional_display] | emotion: grief | salience 4/5 | t=12:34-12:41 | frames: 5
+```
+
+One caveat remains, and it is codebook-agnostic: **the `GRAVITY` heading is hardcoded and does not change with the codebook**, so a moral-identity .docx says `GRAVITY` too. It is a fixed "tool-emitted" marker, not a construct name — the marker ids in brackets identify the construct, and the sidecar records `codebook_file`. Say that if you hand the .docx to a human coder for a moral-identity study; do not let anyone read the heading as the study's construct.
+
+**Codebook (`--codebook PATH`).** Pass the SAME codebook you validated against. render loads it independently, but it now cross-checks itself against `work/codebook_ref.json` — the record a successful `validate-flags` wrote — and **refuses (exit 1), writing nothing**, when the two disagree. Omitting the flag on a moral-identity run is therefore an error you will see, not a corrupt record you will not. Re-run render with the `--codebook` the error names; render is pure assembly and safe to repeat. See `work/codebook_ref.json` under Codebook selection for the record's rules (and the exit-2 unusable-record case).
 
 **Persona (`--persona NAME`).** The confronter's per-video character — "Agent Greg Gorey", "RoboNarc". It is recorded as `interview.persona` in the sidecar and rolls up into the corpus summary's `personas` list and each `per_interview[].persona`. **A persona is metadata — never a role and never a label.** `turns[].label` stays canonical, `coding_scope` still speaks in `INTERVIEWER`/`INTERVIEWEE`, and persona *work* in the speech is coded through the `audience_address` marker, not through this flag. Omit the flag entirely when a video has no persona: passing an empty string is rejected (exit 2) rather than recorded as a persona that is the empty string. If you also want the persona shown in the .docx headers, that is the separate `--interviewer` display name below.
 
@@ -396,10 +435,11 @@ Batch mode: one line per interview (media, claim, codebook, flag count, episode 
 - **A panel file won't parse** → concordance dies on malformed JSON. Save the JSON object from that analyst's reply (labels verbatim); if nothing usable, re-dispatch that one analyst once, or proceed with the 2 usable panels and note the lost analyst in your report.
 - **A batch file hard-fails** (both engines fail, unreadable media) → continue the batch and record the failure; name every failed file explicitly in your final report — `corpus-summary` only counts completed sidecars.
 - **validate-flags rejects** → fix `flags.json` per the printed errors and re-run. Never bypass validation.
+- **`validate-flags` prints `CANNOT VALIDATE:`** → `work/diarized.json` is absent, so a check this stage promises could not run. Your coding may be fine. Run `concordance` (then `validate-episodes`, if this run has an episode layer), then validate-flags. Exit 1, nothing validated, no `codebook_ref.json` written — do not report the run as clean.
 - **validate-episodes rejects** → fix `episodes.json` per the printed errors and re-run until the episode table prints. Repeated problems are capped into one summary line — fix the cause (usually one mistyped timestamp), not each symptom.
-- **A stage exits 2** → broken input, not a finding: a missing/malformed `episodes.json` or a bad `--codebook` path. Nothing was validated. See Exit codes.
+- **A stage exits 2** → broken input, not a finding: a missing/malformed `episodes.json`, a bad `--codebook` path, or an unusable `work/codebook_ref.json` at render. Nothing was validated. See Exit codes.
 - **`validate-flags` reports episode drift** → `episodes.json` changed after the turns were stamped, or `validate-episodes` never ran. Re-run `validate-episodes`, then `validate-flags`. Never hand-edit `episode_id` in `diarized.json` or `flags.json`.
-- **A run used mismatched codebooks across stages** → the sidecar's `codebook_file` will disagree with the codebook you coded against, and nothing raises. Re-run `render` with the correct `--codebook`; the docx and sidecar are rebuilt from the work files.
+- **`render` reports `codebook mismatch`** → its `--codebook` is not the one `work/codebook_ref.json` says `validate-flags` accepted. Exit 1, nothing written. Re-run render with the codebook the error names, or — if the *validation* used the wrong one — re-run `validate-flags` with the codebook you mean and then render. Never hand-edit the record to make the two agree. This guard covers `validate-flags` ↔ `render` only: a wrong `--codebook` at **`validate-episodes`** is still caught by nothing, so check that one yourself.
 - **Frames missing for a flag** → `frames_missing` is recorded on the flag; assess visual evidence from the frames that did extract, or mark it `neutral` if none did.
 - **Never claim the transcript is "error-free"** — no ASR pipeline is. The honest claim is whatever render prints, and that is what you report.
 
@@ -408,9 +448,9 @@ Batch mode: one line per interview (media, claim, codebook, flag count, episode 
 This skill burns tokens primarily on frame reading. Order of magnitude: a 20-flag video interview yields up to ~100 frames, roughly 200 image tokens each at 512px; the transcript stages are cheap by comparison.
 
 - **More than ~10 flags** → do not read every frame in one message. Read frames in per-flag batches, ordered by salience (highest first), and record each flag's `visual_evidence` before moving to the next batch.
-- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-episodes needs `work/diarized.json` + `work/episodes.json`; **validate-flags needs `work/flags.json` AND `work/diarized.json`** (plus `work/final_transcript.json` if you want the duration auto-derived, and `work/episodes.json` when the episode layer ran); frames needs `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json` (plus `work/episodes.json` when the episode layer ran). Any resumed stage that takes `--codebook` needs the same one the run started with — the sidecar of a completed interview records it as `codebook_file`.
+- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-episodes needs `work/diarized.json` + `work/episodes.json`; **validate-flags needs `work/flags.json` AND `work/diarized.json`** (plus `work/final_transcript.json` if you want the duration auto-derived, and `work/episodes.json` when the episode layer ran); frames needs `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json` (plus `work/episodes.json` when the episode layer ran, and it reads `work/codebook_ref.json` — written by the last successful `validate-flags` — to cross-check its own `--codebook`). Any resumed stage that takes `--codebook` needs the same one the run started with — `work/codebook_ref.json` names it, and so does a completed interview's sidecar, as `codebook_file`.
 
-  **`diarized.json` is not optional at validate-flags, and its absence fails OPEN.** The verbatim-quote check exists only when that file is there: resume with `flags.json` alone under the default codebook and a **fabricated quote earns the `OK:` line and exit 0** — the same OK line Step 9 tells you to report as provenance. Under a codebook declaring `coding_scope`/`enforce_attribution_gate` the same resume raises a `ValueError` traceback instead of validating. Never run validate-flags against a work dir missing `diarized.json`; if you are unsure what a resumed work dir holds, `ls` it before trusting an OK.
+  **`diarized.json` is not optional at validate-flags, and its absence now fails CLOSED.** The verbatim-quote check exists only when that file is there, so without it the stage refuses rather than validating: resume with `flags.json` alone and you get `CANNOT VALIDATE:` and exit 1 under **both** codebooks — no `OK:` line, no `codebook_ref.json`, nothing for render to build on. That is the correct behavior, and the reason to supply the turn layer is unchanged: **a resumed session must still bring `diarized.json`, or the coding pass cannot be validated at all.** Re-run `concordance` (and `validate-episodes`, if this run has an episode layer) from the work dir first. If you are unsure what a resumed work dir holds, `ls` it before running anything.
 - **If context runs low mid-batch** → finish the interview in progress through render, report which files remain unprocessed, and tell the user to re-invoke `/interview` on the remainder.
 
 ## Security & Permissions
