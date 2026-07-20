@@ -1,7 +1,7 @@
 ---
 name: interview
 version: "0.3.0"
-description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
+description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript coded against a selectable versioned codebook — narrative gravity by default, or moral identity under public confrontation — with an optional episode layer for multi-target recordings. Output is a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
 argument-hint: "<media-file-or-folder> [notes]"
 allowed-tools: Bash, Read, Write, Agent, AskUserQuestion
 homepage: https://github.com/Jerrymwolf/gravitas
@@ -56,7 +56,7 @@ At the judgment stages, `1` and `2` mean different things and must be handled di
 - **Exit 1 — a validation finding.** `validate-episodes` prints `INVALID EPISODES:`, `validate-flags` prints `INVALID FLAGS:`, one line per problem. Your judgment file is wrong; fix it per each printed line and re-run.
 - **Exit 2 — broken input.** A missing or malformed `episodes.json`, or a `--codebook` path that does not exist or is not a codebook. The message names the file and the exact spot — `ERROR: episodes.json: line 23 column 1 — Illegal trailing comma before end of array`. Nothing was validated. Fix the file or the path; do NOT report this as a finding. (`render --persona ""` is the same class and also exits 2.)
 
-**A crash is not a finding.** `preflight` predates this convention and keeps its own codes (see Step 0). The other hand-authored files — `adjudications.json`, `panel_*.json`, `flags.json` — are not yet routed through the exit-2 path: malformed JSON there surfaces as a raw Python traceback whose last line still gives the line and column. Re-read the file you just wrote; do not report a traceback as a research result.
+**A crash is not a finding.** `preflight` predates this convention and keeps its own codes (see Step 0). The other hand-authored files — `adjudications.json`, `panel_*.json`, `flags.json` — are not yet routed through the exit-2 path: malformed JSON there surfaces as a raw Python traceback and **exits 1, the same code as a validation finding**, so the exit code alone cannot tell them apart — read the output. A traceback's last line still gives the line and column; re-read the file you just wrote. (One traceback is not about a malformed file at all: a `ValueError` from validate-flags means the stages were run out of order — see Step 6.) Never report a traceback as a research result.
 
 ## Step 0 — Preflight
 
@@ -176,33 +176,39 @@ It needs at least 2 panel files, prints `PANELS` and `LABELS` counts, and one `L
 
 **Optional for a plain single-interview recording under the default codebook** — one dyad, one continuous interaction, nothing to segment; skip straight to Step 6. Run this step whenever the recording holds **more than one interaction**. A pilot video held eight separate confrontations with eight different people; under plain INTERVIEWER/INTERVIEWEE diarization all eight targets fused into a single pseudo-person, and every per-target claim was silently wrong. Episodes are what keep them apart.
 
+**A single-confrontation video under the moral-identity codebook may also skip it — but don't.** Nothing forces the episode layer: validate-flags and render both succeed without `episodes.json`. What you lose is the record. That sidecar carries no `episodes` key, its flags carry no `episode_id`, and the interview contributes `{}` to the corpus summary's `episode_outcomes` and `marker_by_outcome` — the arc and the outcome, which are the study's per-episode unit of analysis, simply are not written down anywhere. Author one episode covering the whole video and give it an `arc`.
+
 Read `WORK_DIR/diarized.json` and write `WORK_DIR/episodes.json` as a **top-level array** (not `{"episodes": [...]}`), in time order:
 
 ```json
 [
-  {"id": "e01", "type": "confrontation", "t_start": 0.0, "t_end": 60.0,
+  {"id": "e01", "type": "confrontation", "t_start": 0.0, "t_end": 58.4,
    "target_descriptor": "woman in garage SUV", "target_speech": true,
    "arc": {"phases": ["threat", "defense", "escalation", "exit"],
            "outcome": "refuses", "turning_point": null}},
-  {"id": "e02", "type": "confrontation", "t_start": 60.0, "t_end": 110.0,
+  {"id": "e02", "type": "confrontation", "t_start": 58.4, "t_end": 107.2,
    "target_descriptor": "man in red truck", "target_speech": true,
    "arc": {"phases": ["threat", "defense", "repair", "exit"],
            "outcome": "complies", "turning_point": "t0012"}},
-  {"id": "e03", "type": "to-camera", "t_start": 110.0, "t_end": 130.0}
+  {"id": "e03", "type": "to-camera", "t_start": 107.2, "t_end": 128.6}
 ]
 ```
+
+Those timestamps are not round numbers on purpose — see the snapping rule below. In the transcript behind this example, `58.4` is the start of `t0011` and `107.2` is the start of `t0016`.
 
 - **Required on every episode:** `id` (`e01`, `e02`, … — unique), `type`, `t_start`, `t_end` (seconds, as numbers — a `"0:00"` video-clock string is rejected).
 - `type` is one of `confrontation`, `commendation`, `bystander`, `to-camera`.
 - **Confrontations additionally require `target_descriptor`** — short and concrete ("woman in garage SUV", "Scott") — **and `target_speech`**, which must be the JSON boolean `true`/`false`.
-- `arc` is optional and belongs on confrontations: `phases` a list drawn from `threat`, `defense`, `escalation`, `softening`, `flip`, `repair`, `exit`; `outcome` one of `complies`, `refuses`, `escalates`, `partial`, `n/a`; `turning_point` a turn id (`"t0012"`), the literal `"off-camera"` when the arc turned before the camera ran, or `null`. A codebook declaring `arc_schema` supplies these vocabularies; the ones above are the fallback.
+- `arc` is optional and belongs on confrontations: `phases` a list drawn from `threat`, `defense`, `escalation`, `softening`, `flip`, `repair`, `exit`; `outcome` one of `complies`, `refuses`, `escalates`, `partial`, `n/a`; `turning_point` a **unit-level turn id as printed by finalize and stored in the sidecar's `turns[]`** — `t0012`, never a merged display id (`m0012`), those exist only inside validate and render and are not in the research record — or the literal `"off-camera"` when the arc turned before the camera ran, or `null`. A codebook declaring `arc_schema` supplies these vocabularies; the ones above are the fallback.
 - `note` is optional and free-form — use it to record a low-confidence boundary.
 
 Segmentation rules:
 
-- **Contiguous, non-overlapping, in time order.** Episodes may not overlap and may not run backwards.
-- **Gaps between episodes are legal** — silent B-roll holds no turns and needs no episode. What is enforced is coverage of the turns: **every turn's start must fall inside exactly one episode.** A turn starting in a gap is reported as an orphan (`1 turn(s) fall in no episode: t0016 (start 110.0)`).
-- **A turn may not straddle another episode's start** (`1 turn(s) straddle an episode boundary: t0009 (e01 → e02)`). That is a mis-drawn boundary, and authoring time is the only point at which it can still be fixed — move it to a boundary the transcript actually supports.
+- **Non-overlapping and in time order.** Episodes may not overlap and may not run backwards. They need not be contiguous — see the gap rule.
+- **Snap every boundary to a turn boundary**, reading them off finalize's printed turn list. Do not estimate from the video clock and do not round: a boundary landing mid-turn is the single most common way to fail this stage.
+- **Containment is half-open `[t_start, t_end)`** — a turn starting exactly on a shared boundary belongs to the **later** episode. The final episode is end-inclusive so the recording's last turn is never orphaned. That is the rule that makes snapping work: set the boundary to the first turn of the NEW episode, as `e02`'s `58.4` does above.
+- **Gaps between episodes are legal** — silent B-roll holds no turns and needs no episode (the example leaves `104.0`–`107.2` uncovered). What is enforced is coverage of the turns: **every turn's start must fall inside exactly one episode.** A turn starting in a gap is reported as an orphan (`1 turn(s) fall in no episode: t0016 (start 107.2)`).
+- **A turn may not straddle another episode's start** (`1 turn(s) straddle an episode boundary: t0009 (e01 → e02)`). That is a mis-drawn boundary — almost always an un-snapped one — and authoring time is the only point at which it can still be fixed. Move it to the turn boundary the transcript actually supports.
 - **The confronter's to-camera asides INSIDE an ongoing confrontation belong to that confrontation.** A `to-camera` episode is only a stretch with **no active target** (the wrap-up monologue). Narration delivered over a live target stays in that target's episode — the coding pass picks it up through `speaker_role`, not through a separate episode.
 - **`target_speech: false`** (a target who only revs the engine) means code outcome and confronter performance only, and report "no defense repertoire codeable" for that episode. **Never invent target speech.**
 - Ambiguous boundary (a hard cut mid-interaction) → set it at the first turn addressing the new target, and record the uncertainty in the episode's `note`.
@@ -219,10 +225,12 @@ python3 "${SKILL_DIR}/scripts/interview.py" validate-episodes --work WORK_DIR \
 
 ```
 EPISODES: 3
-  e01 confrontation [00:00-01:00] turns=10 target="woman in garage SUV"
-  e02 confrontation [01:00-01:50] turns=5 target="man in red truck"
-  e03 to-camera [01:50-02:10] turns=2
+  e01 confrontation [00:00-00:58] turns=10 target="woman in garage SUV"
+  e02 confrontation [00:58-01:47] turns=5 target="man in red truck"
+  e03 to-camera [01:47-02:08] turns=2
 ```
+
+(The printed time range is `format_hms`-rounded to whole seconds; `episodes.json` keeps your exact values.)
 
 On errors it prints `INVALID EPISODES:` and exits 1 — fix `episodes.json` per each printed line and re-run **until the table prints**. Repeated identical problems are summarized as one capped line (`+N more`), so fix the cause, not the symptom count.
 
@@ -237,7 +245,7 @@ Read the codebook you fixed in Step 1 **fresh each run** (never from memory — 
 - `quote`: **verbatim substring of the speaker's speech** — no paraphrase. May span consecutive sentences by the same speaker; must never cross a speaker change.
 - `t_start`/`t_end`: seconds, within the media duration.
 - `salience`: integer 1–5 per the codebook's scale. Reserve 5 for genuinely defining moments.
-- **Affect — the codebook names both the field and the vocabulary.** Under the shipped codebook the field is `emotion`, required iff `marker_types` includes `emotional_display`, drawn from its `emotions` list. Under a codebook declaring `affect_field` (the moral-identity codebook declares `affect`), that field is the only one checked and `affect_vocabulary` is the only vocabulary — a stale `emotions` key is ignored. It is required by **every marker carrying `requires_affect: true`**, which in the moral-identity codebook is every defense and identity code; `neutral` is the explicit no-signal value, not an omission.
+- **Affect — the codebook names both the field and the vocabulary.** Under the shipped codebook the field is `emotion`, required iff `marker_types` includes `emotional_display`, drawn from its `emotions` list. Under a codebook declaring `affect_field` (the moral-identity codebook declares `affect`), that field is the only one checked and `affect_vocabulary` is the only vocabulary — a stale `emotions` key is ignored. It is required by **every marker carrying `requires_affect: true`**, which in the moral-identity codebook is 14 of its 16 markers — the only exceptions are `audience_address` and `camera_awareness`. `neutral` is the explicit no-signal value, not an omission.
 - `speaker_role`: see coding scope below.
 - `attribution_uncertain`: see the attribution gate below.
 - `note`: optional, brief.
@@ -265,8 +273,8 @@ Under the moral-identity codebook a flag carries the two extra fields:
 
 ```json
 [
-  {"id": "g0002", "marker_types": ["displacement_of_responsibility"], "quote": "That is the store's job, they get paid to do that.", "t_start": 15.0, "t_end": 20.0, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration"},
-  {"id": "g0007", "marker_types": ["diffusion_of_responsibility"], "quote": "Everyone does it, people leave carts all the time.", "t_start": 40.0, "t_end": 50.0, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration", "attribution_uncertain": true}
+  {"id": "g0002", "marker_types": ["displacement_of_responsibility"], "quote": "That is the store's job, they get paid to do that.", "t_start": 15.1, "t_end": 19.8, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration"},
+  {"id": "g0007", "marker_types": ["diffusion_of_responsibility"], "quote": "Everyone does it, people leave carts all the time.", "t_start": 40.2, "t_end": 49.6, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration", "attribution_uncertain": true}
 ]
 ```
 
@@ -288,7 +296,7 @@ Validation gates the frame stage — never proceed past a failing validate.
 **When `WORK_DIR/episodes.json` exists**, this stage also reconciles the two layers and stamps `episode_id` onto every flag. Three refusals to know, all exit 1:
 
 - `N display turn(s) out of sync with episodes.json — re-run validate-episodes` — `episodes.json` was re-drawn after Step 5 stamped the turns (or Step 5 never ran). Re-run `validate-episodes`, then this stage. Do not hand-edit the stamps.
-- `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first.
+- `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first. **You only see that sentence under the default codebook.** Under a codebook declaring `coding_scope`/`enforce_attribution_gate` — including the moral-identity one in the command above — the same stage order raises first, as a traceback ending `ValueError: turns missing label/concordance (run concordance first): t0001, …`. That traceback is the one case where the input file is fine and the **stage order** is wrong; the remedy is the same concordance → validate-episodes → validate-flags.
 - `g0007: t_start 40.0 outside every episode` / `straddles episodes e01 → e02` — the flag's own placement. Fix the timestamps or the boundary and re-run both stages.
 
 ## Step 7 — Frame evidence (video only)
@@ -324,7 +332,15 @@ Prints `DOCX:` and `SIDECAR:` paths and `CLAIM:` — the accuracy claim, exactly
 - `dual-engine verified with logged adjudication; INCOMPLETE — transcription gaps recorded`
 - `single-engine UNVERIFIED`
 
-The .docx is the speaker-labeled transcript with coded flags anchored as comments. The sidecar is the full machine-readable record, **schema 1.1**: `interview` (media, duration, processed_at, and `persona` when given), `engines`, `accuracy_claim`, top-level `codebook_version` and `codebook_file`, `degradation`, `partial_failures`, `segments`, `turns` (with concordance, votes, and `episode_id` when the episode layer ran), `adjudications`, `flags` (with visual evidence and `episode_id`), plus `episodes` (the validated list, arcs included) when `episodes.json` exists and `speaker_names` when names were passed. `codebook_file` is always present — it is `null` only if no codebook was resolvable — because which codebook produced the record is a fact about the record; both shipped codebooks are independently at version `1.0.0`, so the **filename**, not the version, is what carries identity.
+The .docx is the speaker-labeled transcript with coded flags anchored as comments. The sidecar is the full machine-readable record, **schema 1.1**: `interview` (media, duration, processed_at, and `persona` when given), `engines`, `accuracy_claim`, top-level `codebook_version` and `codebook_file`, `degradation`, `partial_failures`, `segments`, `turns` (with concordance, votes, and `episode_id` when the episode layer ran), `adjudications`, `flags` (with visual evidence and `episode_id`), plus `episodes` (the validated list, arcs included) when `episodes.json` exists and `speaker_names` when names were passed. `codebook_file` is always recorded, because which codebook produced the record is a fact about the record; both shipped codebooks are independently at version `1.0.0`, so the **filename**, not the version, is what carries identity.
+
+**The .docx is not the complete record — the sidecar is.** A Word comment carries the marker list, salience, time range, note, visual evidence and frame count only, under a hardcoded `GRAVITY [...]` heading:
+
+```
+GRAVITY [displacement_of_responsibility] | salience 4/5 | t=00:15-00:19 | frames: 5
+```
+
+A codebook-declared affect field (`affect`), `speaker_role`, `episode_id`, and `attribution_uncertain` **do not appear there** — they are in the sidecar and nowhere else. Say so if you hand the .docx to a human coder for a moral-identity study, and never let a claim about affect, speaker, episode, or attribution be sourced from the .docx alone.
 
 **Codebook (`--codebook PATH`).** Pass the SAME codebook you validated against. render loads it independently, and nothing cross-checks the two stages: omitting it here exits 0 and writes `codebook_file: codebook.json` onto a record coded against a different codebook — a corrupt research record with no error message. If you catch it after the fact, re-run render with the right `--codebook`; render is pure assembly and safe to repeat.
 
@@ -360,7 +376,7 @@ Batch mode: one line per interview (media, claim, codebook, flag count, episode 
 ## Failure modes
 
 - **One engine keyless or failed** → the pipeline continues single-engine (the diff self-compares, so there is nothing to adjudicate). The degradation is recorded in the sidecar and the claim becomes `single-engine UNVERIFIED`. Your report MUST carry that phrase.
-- **Some transcription chunks failed** → recorded in the sidecar's `partial_failures`; the claim gains `INCOMPLETE — transcription gaps recorded`. Note the gaps in your report.
+- **Some transcription chunks failed** → recorded in the sidecar's `partial_failures`. On a dual-engine run the claim gains `INCOMPLETE — transcription gaps recorded`; on a single-engine run it does NOT — the claim stays the plain `single-engine UNVERIFIED`, which swallows the gap. Report the gaps from `partial_failures` either way; do not infer them from the claim.
 - **finalize raises on adjudications** → your `adjudications.json` has missing or unknown ids. Fix the file to cover exactly the printed disagreement ids; do not edit `diff.json`.
 - **A panel file won't parse** → concordance dies on malformed JSON. Save the JSON object from that analyst's reply (labels verbatim); if nothing usable, re-dispatch that one analyst once, or proceed with the 2 usable panels and note the lost analyst in your report.
 - **A batch file hard-fails** (both engines fail, unreadable media) → continue the batch and record the failure; name every failed file explicitly in your final report — `corpus-summary` only counts completed sidecars.
@@ -377,7 +393,9 @@ Batch mode: one line per interview (media, claim, codebook, flag count, episode 
 This skill burns tokens primarily on frame reading. Order of magnitude: a 20-flag video interview yields up to ~100 frames, roughly 200 image tokens each at 512px; the transcript stages are cheap by comparison.
 
 - **More than ~10 flags** → do not read every frame in one message. Read frames in per-flag batches, ordered by salience (highest first), and record each flag's `visual_evidence` before moving to the next batch.
-- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-episodes needs `work/diarized.json` + `work/episodes.json`; validate-flags and frames need `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json` (plus `work/episodes.json` when the episode layer ran). Any resumed stage that takes `--codebook` needs the same one the run started with — the sidecar of a completed interview records it as `codebook_file`.
+- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-episodes needs `work/diarized.json` + `work/episodes.json`; **validate-flags needs `work/flags.json` AND `work/diarized.json`** (plus `work/final_transcript.json` if you want the duration auto-derived, and `work/episodes.json` when the episode layer ran); frames needs `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json` (plus `work/episodes.json` when the episode layer ran). Any resumed stage that takes `--codebook` needs the same one the run started with — the sidecar of a completed interview records it as `codebook_file`.
+
+  **`diarized.json` is not optional at validate-flags, and its absence fails OPEN.** The verbatim-quote check exists only when that file is there: resume with `flags.json` alone under the default codebook and a **fabricated quote earns the `OK:` line and exit 0** — the same OK line Step 9 tells you to report as provenance. Under a codebook declaring `coding_scope`/`enforce_attribution_gate` the same resume raises a `ValueError` traceback instead of validating. Never run validate-flags against a work dir missing `diarized.json`; if you are unsure what a resumed work dir holds, `ls` it before trusting an OK.
 - **If context runs low mid-batch** → finish the interview in progress through render, report which files remain unprocessed, and tell the user to re-invoke `/interview` on the remainder.
 
 ## Security & Permissions

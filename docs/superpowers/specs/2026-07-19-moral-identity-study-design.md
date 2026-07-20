@@ -60,11 +60,11 @@ A new versioned codebook file, sibling to the shipped `codebook.json` (which is 
 
 **5. Arc (per-episode summary, not a flag).** Each confrontation episode gets an `arc` object in the sidecar: ordered phase list (subset of {threat, defense, escalation, softening, flip, repair, exit}), `turning_point` (turn id + what immediately preceded it, or null), `outcome` ∈ {complies, refuses, escalates, partial, n/a}.
 
-**Coding scope is declared by the codebook** (`coding_scope: ["INTERVIEWEE", "INTERVIEWER"]`), not hardcoded in the skill contract — the shipped narrative-gravity codebook declares `["INTERVIEWEE"]`, preserving current behavior exactly.
+**Coding scope is declared by the codebook** (`coding_scope: ["INTERVIEWEE", "INTERVIEWER"]`), not hardcoded in the skill contract. *(As shipped: the narrative-gravity codebook declares NO `coding_scope`, which leaves the scope check switched off entirely and preserves current behavior exactly. The `["INTERVIEWEE"]` default in `validate_flags` is reached only by a codebook that requires `speaker_role` without declaring a scope; under the shipped codebook the interviewee-only rule is enforced by the SKILL.md contract, not by the validator.)*
 
 ## Tool deltas (all additive)
 
-1. **`--codebook PATH`** on the coding-related subcommands (`validate-flags`, `render`, `corpus-summary`): selects the codebook file; default remains the shipped `codebook.json`. The codebook's `coding_scope` drives which roles the gravity/coding pass covers.
+1. **`--codebook PATH`** on the coding-related subcommands (`validate-episodes`, `validate-flags`, `render`): selects the codebook file; default remains the shipped `codebook.json`. *(As shipped: `corpus-summary` deliberately takes NO `--codebook` — aggregation is codebook-agnostic and counts what the sidecars themselves record; an accepted-and-ignored argument would read as a filter. `validate-episodes` takes it instead, for `episode_schema`/`arc_schema`.)* The codebook's `coding_scope` drives which roles the gravity/coding pass covers.
 2. **Episode stage** (new, between concordance and coding). Judgment lives in the skill contract: Claude reads `diarized.json` and writes `WORK_DIR/episodes.json`. A new deterministic subcommand `validate-episodes --work WORK` checks: non-overlapping ordered spans, full turn coverage, enum types, `target_descriptor` present on confrontations, and writes `episode_id` onto each turn. Flags gain `episode_id` (assigned by `t_start` containment) at `validate-flags` time.
 3. **Flag schema additions:** `episode_id`, `speaker_role` (canonical label of the quoted speaker), `affect` (replacing `emotion` in the new codebook's schema; the old codebook keeps `emotion`).
 4. **Sidecar additions:** `episodes` array (with per-episode `arc` for confrontations), `persona` (string, per video), `codebook_file`/`codebook_version` at top level. `speaker_names` already exists (v0.2.0).
@@ -92,7 +92,7 @@ A new versioned codebook file, sibling to the shipped `codebook.json` (which is 
 Follows the repo's pattern (pure-logic tests, no network, no LLM-judgment tests):
 
 - **validate-episodes:** synthetic episode sets — overlap rejection, coverage gaps, bad enum, turn assignment correctness, aside-containment (to-camera turn inside a confrontation span stays in that episode).
-- **Codebook selection:** `--codebook` loads the alternate file; `coding_scope` respected in validation (a CONFRONTER-quoted flag passes under the new codebook, fails under the shipped one); old codebook's behavior byte-identical to today.
+- **Codebook selection:** `--codebook` loads the alternate file; `coding_scope` respected in validation (a CONFRONTER-quoted flag passes under the new codebook); old codebook's behavior byte-identical to today. *(As shipped: the same flag also passes under the shipped codebook, and that is the byte-identical-behavior requirement winning over this line. The shipped codebook declares no `coding_scope` and does not require `speaker_role`, so the scope check never runs for it and an out-of-scope `speaker_role` is simply an unread extra key. Enforcement arrives with the declaration, not with the flag.)*
 - **Flag schema:** `episode_id`/`speaker_role`/`affect` validation; quote-speaker consistency (quote must lie in a turn whose label matches `speaker_role`).
 - **Sidecar/corpus-summary:** episodes + arc serialization; aggregation counts on fixture sidecars.
 - Full suite stays green (153 now; new tests added on top).
