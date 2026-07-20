@@ -446,6 +446,21 @@ class TestQuoteCheckCannotBeSkipped:
         assert "diarized.json" in out            # the missing file
         assert "quote check cannot run" in out   # the consequence
         assert "concordance" in out              # the way out
+        # NOT the findings header: SKILL.md defines `INVALID FLAGS:` as "your
+        # judgment file is wrong", which would send the researcher back to
+        # re-examine coding that is not the problem here
+        assert "CANNOT VALIDATE:" in out
+        assert "INVALID FLAGS:" not in out
+
+    def test_a_real_finding_still_prints_the_findings_header(self, tmp_path, capsys):
+        # the contrast that gives the header above its meaning: a flag the
+        # researcher must actually fix keeps `INVALID FLAGS:`
+        bad = [dict(NARRATIVE_FLAGS[0], marker_types=["nope"])]
+        work = make_work(tmp_path, turns=TURNS, flags=bad)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        out = capsys.readouterr().out
+        assert "INVALID FLAGS:" in out
+        assert "CANNOT VALIDATE:" not in out
 
     def test_a_true_quote_is_refused_the_same_way(self, tmp_path, capsys):
         # the refusal is "could this have been checked", not "was it wrong":
@@ -512,6 +527,9 @@ class TestQuoteCheckCannotBeSkipped:
         out = capsys.readouterr().out
         assert "turn-level validation cannot be skipped" in out
         assert "diarized.json" in out
+        # a precondition, not a finding — same header as the quote refusal
+        assert "CANNOT VALIDATE:" in out
+        assert "INVALID FLAGS:" not in out
 
     # An unlabeled turn layer keeps raising ValueError with its own accurate
     # message — pinned by TestCmdValidateFlagsWiring
@@ -830,6 +848,9 @@ class TestRenderCodebookCrossCheck:
         assert "codebook_moral_identity.json" in err   # what validated the flags
         assert "codebook.json" in err                  # what render resolved
         assert "--codebook" in err                     # what to do about it
+        # and where the record lives: this is new, otherwise-invisible pipeline
+        # state, so a researcher who thinks the record is wrong can find it
+        assert str(base / "work" / "codebook_ref.json") in err
         # nothing written: a refused render must leave no artifact behind
         assert not (base / "sidecar.json").exists()
         assert not (base / "transcript.docx").exists()
@@ -881,6 +902,35 @@ class TestRenderCodebookCrossCheck:
             interview.cmd_render(render_args(media, base))
         assert exc.value.code == 2
         assert "codebook_ref.json" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("record", [
+        {},                                                   # neither key
+        {"codebook_version": "1.0.0"},                        # no file name
+        {"codebook_file": "codebook.json"},                   # no version
+        {"codebook_file": "", "codebook_version": "1.0.0"},   # empty file name
+        {"codebook_file": "codebook.json", "codebook_version": ""},
+        {"codebook_file": None, "codebook_version": "1.0.0"},
+        {"codebook_file": 1, "codebook_version": "1.0.0"},    # not a string
+    ], ids=["empty", "no-file", "no-version", "blank-file", "blank-version",
+            "null-file", "non-string-file"])
+    def test_an_incomplete_record_exits_2_rather_than_refusing_unfollowably(
+            self, tmp_path, capsys, record):
+        # Parseable JSON is not a usable record. Without both values the
+        # comparison still refuses a legitimate render — while instructing the
+        # user to point --codebook at `None`, which nobody can follow, and never
+        # saying the record is what is broken.
+        media, base = make_render_dirs(tmp_path)
+        (base / "work" / "codebook_ref.json").write_text(
+            json.dumps(record), encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            interview.cmd_render(render_args(media, base))
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "not a codebook record" in err
+        assert "codebook_ref.json" in err        # names the file, and its path
+        assert "codebook mismatch" not in err    # never the misleading message
+        assert "None" not in err                 # never the unfollowable one
+        assert not (base / "sidecar.json").exists()
 
     def test_main_dispatches_the_cross_check(self, tmp_path, monkeypatch, capsys):
         media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)

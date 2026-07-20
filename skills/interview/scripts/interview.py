@@ -93,17 +93,19 @@ def _load(path: Path) -> dict | list:
 
 
 def _load_checked(path: Path, expect: type | tuple = (dict, list)) -> dict | list:
-    """_load, but with actionable failures for HAND-AUTHORED inputs.
+    """_load, but with actionable failures for inputs a stage CANNOT USE AT ALL.
 
-    episodes.json and --codebook are written by a person (or by Claude) between
-    stages, so a trailing comma or a mistyped path is the expected failure, not
-    the exceptional one. A raw JSONDecodeError reports a line and column but no
-    filename, and work/ holds four JSON files; a raw FileNotFoundError reports a
-    traceback. Both read as crashes rather than as the fixable input errors they
-    are.
-
-    Exits 2, never 1: a broken input must stay distinguishable from a
-    legitimate validation finding, which is what 1 means at these stages.
+    That is the distinction the exit codes encode, and it is not about who
+    wrote the file: 1 is a validation finding about the research data, 2 is an
+    input this stage cannot proceed from. Hand-authored files are simply where
+    it bites most often — episodes.json and --codebook are written by a person
+    (or by Claude) between stages, so a trailing comma or a mistyped path is the
+    expected failure, not the exceptional one. A raw JSONDecodeError reports a
+    line and column but no filename, and work/ holds several JSON files; a raw
+    FileNotFoundError reports a traceback. Both read as crashes rather than as
+    the fixable input errors they are. A corrupt TOOL-written record (see
+    CODEBOOK_REF) exits 2 by the same rule, and a quote that could not be
+    checked exits 1 by it.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -375,6 +377,22 @@ def cmd_validate_episodes(args) -> int:
     return 0
 
 
+def _cannot_validate(reason: str) -> int:
+    """Report a PRECONDITION failure at validate-flags and return 1.
+
+    Deliberately not the `INVALID FLAGS:` header. SKILL.md defines that one as
+    "your judgment file is wrong; fix it per each printed line" — which sends
+    the researcher back to re-examine their coding. These cases mean the
+    pipeline was run out of order and the required action is to run an EARLIER
+    STAGE; printing them under the findings header makes the remedy contradict
+    the diagnosis. The exit code is still 1: the invocation was well-formed,
+    and 2 is reserved for an input this stage cannot use at all.
+    """
+    print("CANNOT VALIDATE:")
+    print(f"  {reason}")
+    return 1
+
+
 def cmd_validate_flags(args) -> int:
     work = Path(args.work)
     flags = _load(work / "flags.json")
@@ -410,37 +428,35 @@ def cmd_validate_flags(args) -> int:
         # Exit 1, not 2: the command line was well-formed, the pipeline was run
         # out of order — the same shape (and the same exit code) as every other
         # not-ready-yet refusal here and in cmd_render. Exit 2 is reserved for
-        # broken hand-authored input, which this is not.
-        errors = [f"work/diarized.json is absent, so the verbatim-quote check "
-                  f"cannot run against {len(quoted)} flag(s) carrying a quote "
-                  f"({', '.join(quoted[:5])}) — run concordance, and "
-                  f"validate-episodes if this run has an episode layer, before "
-                  f"validate-flags"]
-    else:
-        # `turns=` is load-bearing, not a convenience: a codebook declaring
-        # coding_scope or enforce_attribution_gate RAISES without turns rather
-        # than silently skipping its attribution guarantees. Unlabeled units are
-        # handed over as-is rather than as None, so validate_flags reports the
-        # real cause ("run concordance first") instead of the inaccurate "no
-        # turns supplied".
-        try:
-            errors = validate_flags(flags, codebook, duration,
-                                    transcript_text=transcript_text,
-                                    turns=merged if merged is not None else turns)
-        except ValueError as exc:
-            if turns is not None:
-                # A turn layer EXISTS but is unlabeled. validate_flags' own
-                # message already names that cause precisely; re-raising keeps
-                # it, and keeps this except from swallowing raises that mean
-                # something other than "the stage before this never ran".
-                raise
-            # No turn layer at all, and no quotes to have caught it above (an
-            # empty or quote-less flag set): the codebook's own
-            # coding_scope/gate declaration is what demands turns here. A real
-            # precondition failure, so it reaches the user as a finding rather
-            # than as a bare traceback out of this stage.
-            errors = [f"{exc} — work/diarized.json is absent; run concordance "
-                      f"before validate-flags"]
+        # an input this stage cannot use at all, which this is not.
+        return _cannot_validate(
+            f"work/diarized.json is absent, so the verbatim-quote check cannot "
+            f"run against {len(quoted)} flag(s) carrying a quote "
+            f"({', '.join(quoted[:5])}) — run concordance, and validate-episodes "
+            f"if this run has an episode layer, before validate-flags")
+    # `turns=` is load-bearing, not a convenience: a codebook declaring
+    # coding_scope or enforce_attribution_gate RAISES without turns rather than
+    # silently skipping its attribution guarantees. Unlabeled units are handed
+    # over as-is rather than as None, so validate_flags reports the real cause
+    # ("run concordance first") instead of the inaccurate "no turns supplied".
+    try:
+        errors = validate_flags(flags, codebook, duration,
+                                transcript_text=transcript_text,
+                                turns=merged if merged is not None else turns)
+    except ValueError as exc:
+        if turns is not None:
+            # A turn layer EXISTS but is unlabeled. validate_flags' own message
+            # already names that cause precisely; re-raising keeps it, and keeps
+            # this except from swallowing raises that mean something other than
+            # "the stage before this never ran".
+            raise
+        # No turn layer at all, and no quotes to have caught it above (an empty
+        # or quote-less flag set): the codebook's own coding_scope/gate
+        # declaration is what demands turns here. A real precondition failure,
+        # so it reaches the user as one rather than as a bare traceback.
+        return _cannot_validate(
+            f"{exc} — work/diarized.json is absent; run concordance before "
+            f"validate-flags")
     ep_path = work / "episodes.json"
     if not errors and ep_path.exists():
         episodes = _load_checked(ep_path, expect=list)
@@ -537,13 +553,36 @@ def cmd_render(args) -> int:
     if ref_path.exists():
         ref = _load_checked(ref_path, expect=dict)
         used = (ref.get("codebook_file"), ref.get("codebook_version"))
+        if not all(isinstance(v, str) and v for v in used):
+            # Parseable JSON is not a usable record. Without BOTH values the
+            # comparison below still runs and still refuses — but it refuses a
+            # legitimate render while telling the user to "point --codebook at
+            # None", an instruction nobody can follow, and never says the record
+            # is what is broken. Positive discriminator, the same shape as
+            # _load_codebook's "not a codebook" guard. Exit 2: an input this
+            # stage cannot use at all, not a finding about the research data.
+            print(f"ERROR: {ref_path.name}: not a codebook record — no "
+                  f"'codebook_file'/'codebook_version' pair, so render cannot "
+                  f"confirm which codebook this work dir was validated against. "
+                  f"Delete "
+                  f"{ref_path} and re-run validate-flags with the codebook you "
+                  f"mean, then render again.", file=sys.stderr)
+            raise SystemExit(2)
         here = (codebook_path.name, codebook["codebook_version"])
         if used != here:
-            print(f"ERROR: codebook mismatch — validate-flags accepted these "
-                  f"flags against {used[0]} ({used[1]}), but render resolved "
-                  f"{here[0]} ({here[1]}). Re-run render with --codebook "
-                  f"pointing at {used[0]}, or re-run validate-flags with the "
-                  f"codebook you mean and then render again.", file=sys.stderr)
+            # Names the record's path: this is new, otherwise-invisible pipeline
+            # state, and a researcher who believes the record itself is wrong
+            # needs to be able to find and reset it.
+            # "last accepted a flag set", not "accepted these flags": the record
+            # attests to the CODEBOOK, not to the current contents of
+            # flags.json, and wording that implies otherwise would make render
+            # look provenance-checked on an axis it does not check.
+            print(f"ERROR: codebook mismatch — {ref_path} records that "
+                  f"validate-flags last accepted a flag set against {used[0]} "
+                  f"({used[1]}), but render resolved {here[0]} ({here[1]}). "
+                  f"Re-run render with --codebook pointing at {used[0]}, or "
+                  f"re-run validate-flags with the codebook you mean and then "
+                  f"render again.", file=sys.stderr)
             return 1
     # The episode layer is optional (the narrative pipeline predates it), but
     # when it exists it is part of the research record, not a staging artifact.

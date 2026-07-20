@@ -2,7 +2,10 @@
 
 All notable changes to the **Gravitas** product — the `skills/interview/` skill —
 are documented here. The upstream `/watch` skill keeps its own independent
-version line in [`CHANGELOG.md`](CHANGELOG.md); the two never share a number.
+version line in [`CHANGELOG.md`](CHANGELOG.md). The two lines advance
+separately, so a number in one says nothing about the other: both are at
+`0.2.0` for entirely unrelated reasons, and a `0.3.0` here implies nothing about
+`/watch`.
 
 ## [0.3.0] — unreleased
 
@@ -53,14 +56,19 @@ keep a coded artifact honest about which construct produced it.
   available to check it against, naming the missing file and the consequence —
   matching `render`, which already failed closed on exactly this condition. A
   codebook whose `coding_scope` / `enforce_attribution_gate` demands turns now
-  reports that as a finding here too, instead of a bare traceback.
+  reports that here too, instead of a bare traceback. Both print under a
+  distinct **`CANNOT VALIDATE:`** header rather than `INVALID FLAGS:`: the
+  remedy is to run an earlier stage, not to re-examine your coding.
 - **`render` silently recorded the wrong codebook.** Omitting `--codebook` on a
   moral-identity run exited 0 and wrote `codebook_file: "codebook.json"` into a
   sidecar full of moral-identity markers. A successful `validate-flags` now
   records the codebook it accepted the flags against in
   `work/codebook_ref.json`, and `render` refuses (exit 1) when the codebook it
-  resolves differs in name or version, naming both. Work dirs with no such
-  record still render, so runs predating this stay valid.
+  resolves differs in name or version, naming both and the record's path. Work
+  dirs with no such record still render, so runs predating this stay valid; a
+  record that is present but unusable (missing or blank `codebook_file` /
+  `codebook_version`) exits 2 naming the record, rather than refusing a
+  legitimate render with an instruction that cannot be followed.
 - **The `.docx` comment dropped codebook-declared fields.** It read `emotion`
   only, so a codebook declaring `affect_field: "affect"` lost its affect
   entirely, along with `speaker_role`, `episode_id`, and

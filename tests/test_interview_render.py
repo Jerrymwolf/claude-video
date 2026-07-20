@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 import zipfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from render import build_docx_parts, build_sidecar, format_hms, write_docx
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "interview" / "scripts"
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
@@ -284,6 +287,40 @@ class TestFlagCommentFields:
         text = self.comment_text()
         assert "emotion: anger" in text
         assert "affect" not in text
+
+    def test_the_narrative_comment_line_is_byte_stable(self):
+        """The exact narrative line, pinned whole.
+
+        Two design decisions in this function exist to keep this string
+        unchanged (the `GRAVITY` prefix stays literal; the affect segment keeps
+        the label of the field the flag actually carries), and substring
+        assertions cannot enforce either — nor can they catch an edit to the
+        salience/t=/note/visual/frames tail, which would silently rewrite every
+        existing narrative .docx while the suite stayed green.
+        """
+        assert self.comment_text() == (
+            "GRAVITY [emotional_display] | emotion: anger | salience 4/5 | "
+            "t=00:08-00:11 | anger tied to the layoff episode | "
+            "visual: corroborates — jaw set, gesture sharpens | frames: 1")
+
+    def test_every_shipped_codebook_declares_an_affect_field_this_reads(self):
+        """`_flag_comment_text` hardcodes the pair 'affect'/'emotion'.
+
+        It cannot consult `codebook["affect_field"]` — build_docx_parts never
+        receives the codebook — so a third codebook declaring, say,
+        `affect_field: "valence"` would silently drop affect from the .docx
+        comment: byte-for-byte the defect this class was written to fix, one
+        codebook later. Pin the coupling so it fails here, loudly, instead.
+        """
+        fields = {json.loads(p.read_text(encoding="utf-8")).get("affect_field",
+                                                                "emotion")
+                  for p in SCRIPTS.glob("codebook*.json")}
+        assert fields, "no codebooks found — the glob went stale"
+        assert fields <= {"emotion", "affect"}, (
+            "_flag_comment_text hardcodes 'affect'/'emotion'; a codebook "
+            "declaring another affect_field would silently drop it from the "
+            ".docx comment. Thread the codebook into build_docx_parts, or "
+            "extend the pair here.")
 
     def test_affect_wins_when_a_flag_carries_both(self):
         # a codebook-declared affect_field is the authority; a stale `emotion`
