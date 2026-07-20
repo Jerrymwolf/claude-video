@@ -710,7 +710,34 @@ class TestAssignment:
         errs = assign_flag_episodes(flags, EPISODES)
         assert flags[0]["episode_id"] == "e01"
         assert any("g0002" in e and "outside every episode" in e for e in errs)
+
+
+class TestCodebookDrivenEnums:
+    """The codebook is the source of truth for episode/arc enums; the module
+    constants are only the no-codebook fallback. These lock both halves so the
+    two can never silently diverge."""
+
+    MORAL = json.loads((Path(__file__).resolve().parent.parent / "skills" / "interview"
+                        / "scripts" / "codebook_moral_identity.json").read_text(encoding="utf-8"))
+
+    def test_shipped_codebook_enums_match_module_fallbacks(self):
+        import analyze
+        assert set(self.MORAL["episode_schema"]["types"]) == analyze.EPISODE_TYPES
+        assert set(self.MORAL["arc_schema"]["phases"]) == analyze.ARC_PHASES
+        assert set(self.MORAL["arc_schema"]["outcomes"]) == analyze.ARC_OUTCOMES
+
+    def test_codebook_enums_override_fallbacks(self):
+        cb = {"episode_schema": {"types": ["confrontation"]},
+              "arc_schema": {"phases": ["threat"], "outcomes": ["complies"]}}
+        # 'commendation' is a module-constant type but NOT in this codebook
+        errs = validate_episodes([ep("e01", "commendation", 0.0, 200.0)], TURNS, codebook=cb)
+        assert any("unknown type 'commendation'" in e for e in errs)
+
+    def test_no_codebook_falls_back_to_module_constants(self):
+        assert validate_episodes(EPISODES, TURNS, codebook=None) == []
 ```
+
+Add the imports this class needs to the top of the file: `import json`, `from pathlib import Path`, and `validate_episodes` is already imported.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -727,7 +754,23 @@ ARC_PHASES = {"threat", "defense", "escalation", "softening", "flip", "repair", 
 ARC_OUTCOMES = {"complies", "refuses", "escalates", "partial", "n/a"}
 
 
-def validate_episodes(episodes: list[dict], turns: list[dict]) -> list[str]:
+def _episode_enums(codebook: dict | None) -> tuple[set, set, set]:
+    """Episode/arc enums, preferring the codebook's declaration.
+
+    The constants above are the fallback for codebooks that declare no episode
+    schema (the shipped narrative-gravity codebook). Reading the codebook first
+    keeps this consistent with validate_flags: behavior is driven by the file
+    that defines the construct, not by a second copy hidden in Python.
+    """
+    cb = codebook or {}
+    ep = set((cb.get("episode_schema") or {}).get("types") or EPISODE_TYPES)
+    arc = cb.get("arc_schema") or {}
+    return ep, set(arc.get("phases") or ARC_PHASES), set(arc.get("outcomes") or ARC_OUTCOMES)
+
+
+def validate_episodes(
+    episodes: list[dict], turns: list[dict], codebook: dict | None = None
+) -> list[str]:
     """Return human-readable violations (empty = valid).
 
     Episodes are ordered, non-overlapping time spans. Gaps BETWEEN episodes are
@@ -737,6 +780,7 @@ def validate_episodes(episodes: list[dict], turns: list[dict]) -> list[str]:
     turn id or the literal "off-camera" — arcs can turn before the camera ran).
     """
     errors: list[str] = []
+    episode_types, arc_phases, arc_outcomes = _episode_enums(codebook)
     if not isinstance(episodes, list) or not episodes:
         return ["episodes.json must be a non-empty array"]
     ids = [e.get("id") for e in episodes]
@@ -749,8 +793,8 @@ def validate_episodes(episodes: list[dict], turns: list[dict]) -> list[str]:
             if e.get(field) in (None, ""):
                 errors.append(f"{ref}: missing required field '{field}'")
         etype = e.get("type")
-        if etype and etype not in EPISODE_TYPES:
-            errors.append(f"{ref}: unknown type '{etype}' (valid: {sorted(EPISODE_TYPES)})")
+        if etype and etype not in episode_types:
+            errors.append(f"{ref}: unknown type '{etype}' (valid: {sorted(episode_types)})")
         t0, t1 = e.get("t_start"), e.get("t_end")
         if isinstance(t0, (int, float)) and isinstance(t1, (int, float)):
             if t0 > t1:
@@ -766,10 +810,10 @@ def validate_episodes(episodes: list[dict], turns: list[dict]) -> list[str]:
         arc = e.get("arc")
         if arc is not None:
             for ph in arc.get("phases", []):
-                if ph not in ARC_PHASES:
+                if ph not in arc_phases:
                     errors.append(f"{ref}: unknown arc phase '{ph}'")
             outcome = arc.get("outcome")
-            if outcome is not None and outcome not in ARC_OUTCOMES:
+            if outcome is not None and outcome not in arc_outcomes:
                 errors.append(f"{ref}: unknown arc outcome '{outcome}'")
             tp = arc.get("turning_point")
             if tp is not None and not isinstance(tp, str):
@@ -871,7 +915,7 @@ class TestCmdValidateEpisodes:
 
     def test_valid_episodes_stamp_turns(self, tmp_path, capsys):
         work = self._work(tmp_path, EPISODES, TURNS)
-        rc = interview.cmd_validate_episodes(SimpleNamespace(work=str(work)))
+        rc = interview.cmd_validate_episodes(SimpleNamespace(work=str(work), codebook=None))
         assert rc == 0
         stamped = json.loads((work / "diarized.json").read_text())
         assert [t["episode_id"] for t in stamped] == ["e01", "e01", "e02", "e03"]
@@ -881,7 +925,7 @@ class TestCmdValidateEpisodes:
         bad = [ep("e01", "confrontation", 0.0, 100.0),
                ep("e02", "commendation", 90.0, 120.0)]
         work = self._work(tmp_path, bad, TURNS[:3])
-        rc = interview.cmd_validate_episodes(SimpleNamespace(work=str(work)))
+        rc = interview.cmd_validate_episodes(SimpleNamespace(work=str(work), codebook=None))
         assert rc == 1
         assert "episode_id" not in json.loads((work / "diarized.json").read_text())[0]
 
@@ -944,7 +988,8 @@ def cmd_validate_episodes(args) -> int:
     work = Path(args.work)
     episodes = _load(work / "episodes.json")
     turns = _load(work / "diarized.json")
-    errors = validate_episodes(episodes, turns)
+    codebook_path = Path(args.codebook) if getattr(args, "codebook", None) else CODEBOOK_PATH
+    errors = validate_episodes(episodes, turns, codebook=_load(codebook_path))
     if errors:
         print("INVALID EPISODES:")
         for e in errors:
@@ -1003,7 +1048,7 @@ and replace the tail of the function — from the `transcript_text = None` line 
 (d) In `main()`: extend the two parser lines:
 
 ```python
-    p = sub.add_parser("validate-episodes"); p.add_argument("--work", required=True)
+    p = sub.add_parser("validate-episodes"); p.add_argument("--work", required=True); p.add_argument("--codebook", metavar="PATH", help="codebook whose episode_schema/arc_schema govern validation (default: shipped codebook.json)")
     p = sub.add_parser("validate-flags"); p.add_argument("--work", required=True); p.add_argument("--duration"); p.add_argument("--codebook", metavar="PATH", help="alternate codebook file (default: shipped codebook.json)")
 ```
 
