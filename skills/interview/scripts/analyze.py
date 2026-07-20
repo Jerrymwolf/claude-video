@@ -335,3 +335,117 @@ def burst_timestamps(
     offsets = [0.0] if count == 1 else [(-spread + 2 * half * i) for i in range(count)]
     points = [min(max(mid + off, 0.0), float(duration)) for off in offsets]
     return sorted(set(round(p, 2) for p in points))
+
+
+EPISODE_TYPES = {"confrontation", "commendation", "bystander", "to-camera"}
+ARC_PHASES = {"threat", "defense", "escalation", "softening", "flip", "repair", "exit"}
+ARC_OUTCOMES = {"complies", "refuses", "escalates", "partial", "n/a"}
+
+
+def _episode_enums(codebook: dict | None) -> tuple[set, set, set]:
+    """Episode/arc enums, preferring the codebook's declaration.
+
+    The constants above are the fallback for codebooks that declare no episode
+    schema (the shipped narrative-gravity codebook). Reading the codebook first
+    keeps this consistent with validate_flags: behavior is driven by the file
+    that defines the construct, not by a second copy hidden in Python.
+    """
+    cb = codebook or {}
+    ep = set((cb.get("episode_schema") or {}).get("types") or EPISODE_TYPES)
+    arc = cb.get("arc_schema") or {}
+    return ep, set(arc.get("phases") or ARC_PHASES), set(arc.get("outcomes") or ARC_OUTCOMES)
+
+
+def _containing_episode(t: float, episodes: list[dict]) -> dict | None:
+    """Half-open containment [t_start, t_end) so a time exactly on a shared
+    boundary belongs to the LATER episode; the final episode is end-inclusive
+    so the recording's last turn is never orphaned."""
+    for i, e in enumerate(episodes):
+        t0, t1 = e.get("t_start"), e.get("t_end")
+        if not (isinstance(t0, (int, float)) and isinstance(t1, (int, float))):
+            continue
+        last = i == len(episodes) - 1
+        if t0 <= t < t1 or (last and t == t1):
+            return e
+    return None
+
+
+def validate_episodes(
+    episodes: list[dict], turns: list[dict], codebook: dict | None = None
+) -> list[str]:
+    """Return human-readable violations (empty = valid).
+
+    Episodes are ordered, non-overlapping time spans. Gaps BETWEEN episodes are
+    legal (silent B-roll holds no turns); coverage is enforced over turns —
+    every turn's start must fall inside exactly one episode. Arc objects are
+    optional; when present their enums are checked (turning_point may be a
+    turn id or the literal "off-camera" — arcs can turn before the camera ran).
+    """
+    errors: list[str] = []
+    episode_types, arc_phases, arc_outcomes = _episode_enums(codebook)
+    if not isinstance(episodes, list) or not episodes:
+        return ["episodes.json must be a non-empty array"]
+    ids = [e.get("id") for e in episodes]
+    for dup in sorted({i for i in ids if i and ids.count(i) > 1}):
+        errors.append(f"{dup}: duplicate episode id")
+    prev_end, prev_id = None, None
+    for i, e in enumerate(episodes):
+        ref = e.get("id", f"episodes[{i}]")
+        for field in ("id", "type", "t_start", "t_end"):
+            if e.get(field) in (None, ""):
+                errors.append(f"{ref}: missing required field '{field}'")
+        etype = e.get("type")
+        if etype and etype not in episode_types:
+            errors.append(f"{ref}: unknown type '{etype}' (valid: {sorted(episode_types)})")
+        t0, t1 = e.get("t_start"), e.get("t_end")
+        if isinstance(t0, (int, float)) and isinstance(t1, (int, float)):
+            if t0 > t1:
+                errors.append(f"{ref}: t_start > t_end")
+            if prev_end is not None and t0 < prev_end:
+                errors.append(f"{ref}: overlaps {prev_id} (starts at {t0} before its end {prev_end})")
+            prev_end, prev_id = t1, ref
+        if etype == "confrontation":
+            if not str(e.get("target_descriptor") or "").strip():
+                errors.append(f"{ref}: confrontation requires a target_descriptor")
+            if not isinstance(e.get("target_speech"), bool):
+                errors.append(f"{ref}: target_speech must be true/false")
+        arc = e.get("arc")
+        if arc is not None:
+            for ph in arc.get("phases", []):
+                if ph not in arc_phases:
+                    errors.append(f"{ref}: unknown arc phase '{ph}'")
+            outcome = arc.get("outcome")
+            if outcome is not None and outcome not in arc_outcomes:
+                errors.append(f"{ref}: unknown arc outcome '{outcome}'")
+            tp = arc.get("turning_point")
+            if tp is not None and not isinstance(tp, str):
+                errors.append(f"{ref}: turning_point must be a turn id, 'off-camera', or null")
+    for t in turns:
+        if _containing_episode(float(t["start"]), episodes) is None:
+            errors.append(f"{t.get('id', '?')}: start {t['start']} falls in no episode")
+    return errors
+
+
+def assign_episode_ids(turns: list[dict], episodes: list[dict]) -> list[dict]:
+    """Stamp episode_id onto each turn by start-time containment (in place).
+    Call only after validate_episodes returns clean — assumes full coverage."""
+    for t in turns:
+        home = _containing_episode(float(t["start"]), episodes)
+        if home is None:
+            raise ValueError(f"{t.get('id', '?')}: start {t['start']} falls in no episode")
+        t["episode_id"] = home["id"]
+    return turns
+
+
+def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
+    """Stamp episode_id onto each flag by t_start containment (in place).
+    Returns errors for flags outside every episode instead of raising — flag
+    placement is a judgment product and its errors go back to the coder."""
+    errors: list[str] = []
+    for f in flags:
+        home = _containing_episode(float(f.get("t_start", -1)), episodes)
+        if home is None:
+            errors.append(f"{f.get('id', '?')}: t_start {f.get('t_start')} outside every episode")
+        else:
+            f["episode_id"] = home["id"]
+    return errors
