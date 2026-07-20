@@ -236,9 +236,12 @@ def build_sidecar(
     non-empty so the artifact is self-describing, but `turns[].label` stays
     canonical — the research record is role-based, names are a display layer.
 
-    `episodes` (the validated episode list, arcs included), `persona` (the
-    confronter's per-video character), and `codebook_file` are recorded when
-    provided so the artifact is self-describing; schema_version 1.1 adds them."""
+    `episodes` (the validated episode list, arcs included) and `persona` (the
+    confronter's per-video character) are recorded when provided, so the
+    artifact is self-describing; empty values read as absent. `codebook_file`
+    is a fixed slot instead, recorded even as None: which codebook produced the
+    record is a fact about the record, and an absent key would only say that
+    the caller did not name one. schema_version 1.1 adds all three."""
     dual = engines.get("groq") and engines.get("openai") and not any(
         ENGINE_SKIPPED in d or TRANSCRIPTION_FAILED in d for d in degradation
     )
@@ -258,7 +261,10 @@ def build_sidecar(
         },
         "engines": engines,
         "accuracy_claim": claim,
+        # Codebook identity sits here, ahead of the potentially huge flags
+        # array, so a human opening the artifact reads it without scrolling.
         "codebook_version": codebook_version,
+        "codebook_file": codebook_file,
         "degradation": degradation,
         "partial_failures": partial_failures,
         "segments": segments,
@@ -270,8 +276,6 @@ def build_sidecar(
         sidecar["interview"]["persona"] = persona
     if episodes is not None:
         sidecar["episodes"] = copy.deepcopy(episodes)
-    if codebook_file:
-        sidecar["codebook_file"] = codebook_file
     if speaker_names:
         sidecar["speaker_names"] = dict(speaker_names)
     return sidecar

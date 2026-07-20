@@ -125,9 +125,21 @@ def _load_codebook(args) -> tuple[Path, dict]:
     """
     path = Path(args.codebook) if args.codebook else CODEBOOK_PATH
     codebook = _load_checked(path, expect=dict)
-    if "codebook_version" not in codebook:
-        print(f"ERROR: {path.name}: not a codebook — no 'codebook_version' key "
-              f"(did you point --codebook at the wrong file?)", file=sys.stderr)
+    # Two keys, not one. `codebook_version` alone stopped discriminating the
+    # moment sidecar schema 1.1 began recording its OWN top-level
+    # codebook_version: --codebook <a prior run's sidecar.json> then loaded
+    # clean and died several frames later on codebook["markers"] — verbatim the
+    # traceback this guard exists to prevent. `markers` is that dereference, so
+    # requiring it here turns the KeyError into this message. Positive
+    # discriminator ("has what a codebook has") rather than a sidecar
+    # blocklist: it rejects every non-codebook, not only the one file type we
+    # happened to think of.
+    missing = [k for k in ("codebook_version", "markers") if k not in codebook]
+    if missing:
+        print(f"ERROR: {path.name}: not a codebook — no "
+              + " or ".join(f"'{k}'" for k in missing)
+              + " key (did you point --codebook at the wrong file?)",
+              file=sys.stderr)
         raise SystemExit(2)
     return path, codebook
 
@@ -443,6 +455,14 @@ def cmd_frames(args) -> int:
 
 
 def cmd_render(args) -> int:
+    if args.persona is not None and not args.persona.strip():
+        # `--persona "$PERSONA"` with the variable unset. Recording "" would
+        # assert this video HAS a persona and that it is the empty string;
+        # dropping it silently would swallow a batch-run mistake. Exit 2, like
+        # the other broken-input paths — a bad invocation, not a finding.
+        print("ERROR: --persona was given an empty value — omit the flag "
+              "entirely if this video has no persona", file=sys.stderr)
+        return 2
     media = Path(args.media)
     base, work = out_dirs(media, args.out_dir)
     turns = _load(work / "diarized.json")
@@ -493,9 +513,14 @@ def cmd_render(args) -> int:
         speaker_names=names,
         episodes=episodes,
         persona=args.persona,
-        # Identity only when it is not the default: an absent key means the
-        # shipped codebook, which is what every pre-1.1 sidecar already meant.
-        codebook_file=codebook_path.name if codebook_path != CODEBOOK_PATH else None,
+        # Unconditional. An absent key would record that the DEFAULT WAS TAKEN
+        # — a fact about the invocation, not about the codebook — and it lies
+        # both ways: --codebook <the shipped file, spelled relatively> is not
+        # the default path yet names the same document, while a foreign
+        # study/codebook.json is indistinguishable by name from the shipped
+        # one. Both codebooks are independently at 1.0.0, so the version field
+        # cannot repair either; the name is what carries identity.
+        codebook_file=codebook_path.name,
     )
     notes = degradation + (
         ["transcription gaps: " + "; ".join(partial)] if partial else []
@@ -505,6 +530,15 @@ def cmd_render(args) -> int:
     if not turns or not all("label" in t for t in turns):
         print("ERROR: render requires labeled turns — run concordance first",
               file=sys.stderr)
+        return 1
+    if episodes is not None and not all("episode_id" in t for t in turns):
+        # Same fail-closed shape as the guard directly above. render stays pure
+        # assembly and does not re-validate the layer — but recording an
+        # episode layer the turn layer was never reconciled against writes a
+        # research record whose two halves disagree, and nothing else in the
+        # pipeline forces validate-episodes to have run before render.
+        print("ERROR: episodes.json is present but the turns carry no "
+              "episode_id — run validate-episodes first", file=sys.stderr)
         return 1
     display_turns = merge_labeled_turns(turns)
     docx_path = write_docx(

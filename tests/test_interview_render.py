@@ -341,7 +341,28 @@ class TestSidecar:
         sc = self._sidecar()
         assert "episodes" not in sc
         assert "persona" not in sc["interview"]
-        assert "codebook_file" not in sc
+        # codebook_file is a fixed slot, not an optional one: None says "the
+        # builder was never told", which cmd_render never does
+        assert sc["codebook_file"] is None
+
+    def test_codebook_identity_serializes_ahead_of_the_flags_array(self):
+        # a human opening the artifact must reach "which codebook?" without
+        # scrolling past every flag
+        keys = list(self._sidecar())
+        assert keys.index("codebook_version") < keys.index("flags")
+        assert keys.index("codebook_file") < keys.index("flags")
+
+    def test_empty_persona_reads_as_absent(self):
+        # the CLI refuses --persona "" outright (an unset shell variable); the
+        # builder's own rule is that an empty character is no character
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=TURNS, adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+            persona="",
+        )
+        assert "persona" not in sc["interview"]
 
     def test_codebook_version_recorded_at_top_level_on_the_shipped_path(self):
         # identity belongs to the record, not only to each flag: a sidecar whose
