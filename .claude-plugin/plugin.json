@@ -1,6 +1,6 @@
 {
   "name": "gravitas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Interview transcription that measures narrative gravity. The /interview skill turns a social-science interview into a dual-engine verified, speaker-diarized transcript with narrative-gravity flags (.docx + JSON sidecar). Bundles the upstream /watch video skill unchanged.",
   "author": {
     "name": "Jeremiah Wolf"
