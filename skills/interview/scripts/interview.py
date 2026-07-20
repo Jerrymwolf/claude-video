@@ -553,20 +553,31 @@ def cmd_render(args) -> int:
     if ref_path.exists():
         ref = _load_checked(ref_path, expect=dict)
         used = (ref.get("codebook_file"), ref.get("codebook_version"))
-        if not all(isinstance(v, str) and v for v in used):
-            # Parseable JSON is not a usable record. Without BOTH values the
-            # comparison below still runs and still refuses — but it refuses a
-            # legitimate render while telling the user to "point --codebook at
-            # None", an instruction nobody can follow, and never says the record
-            # is what is broken. Positive discriminator, the same shape as
-            # _load_codebook's "not a codebook" guard. Exit 2: an input this
-            # stage cannot use at all, not a finding about the research data.
-            print(f"ERROR: {ref_path.name}: not a codebook record — no "
+        # Parseable JSON is not a usable record. Without BOTH values the
+        # comparison below still runs and still refuses — but it refuses a
+        # legitimate render while telling the user to "point --codebook at
+        # None", an instruction nobody can follow, and never says the record is
+        # what is broken. Positive discriminator, the same shape as
+        # _load_codebook's "not a codebook" guard. Exit 2: an input this stage
+        # cannot use at all, not a finding about the research data.
+        #
+        # Asymmetric on purpose, because the two fields have different
+        # provenance. `codebook_file` is always Path.name, so it is always a
+        # str. `codebook_version` is whatever the author's codebook declared and
+        # _load_codebook constrains only its PRESENCE, never its type — so a
+        # codebook versioned `2` rather than `"2"` is accepted everywhere else
+        # in the pipeline. Demanding a str here would reject a record this tool
+        # itself just wrote, with a remedy (delete it and re-run validate-flags)
+        # that re-creates the identical record and loops forever. `.strip()` on
+        # both, because `and v` catches "" but not "   ", and a whitespace-only
+        # value reaches the mismatch message as a blank the user cannot act on.
+        if not (isinstance(used[0], str) and used[0].strip()
+                and used[1] is not None and str(used[1]).strip()):
+            print(f"ERROR: {ref_path.name}: not a codebook record — no usable "
                   f"'codebook_file'/'codebook_version' pair, so render cannot "
                   f"confirm which codebook this work dir was validated against. "
-                  f"Delete "
-                  f"{ref_path} and re-run validate-flags with the codebook you "
-                  f"mean, then render again.", file=sys.stderr)
+                  f"Delete {ref_path} and re-run validate-flags with the "
+                  f"codebook you mean, then render again.", file=sys.stderr)
             raise SystemExit(2)
         here = (codebook_path.name, codebook["codebook_version"])
         if used != here:

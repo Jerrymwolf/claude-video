@@ -909,10 +909,16 @@ class TestRenderCodebookCrossCheck:
         {"codebook_file": "codebook.json"},                   # no version
         {"codebook_file": "", "codebook_version": "1.0.0"},   # empty file name
         {"codebook_file": "codebook.json", "codebook_version": ""},
+        # whitespace-only, not empty: `and v` alone would let these through to
+        # the mismatch message, which then prints a blank where the file name
+        # and version belong and tells the user to pass `--codebook    `
+        {"codebook_file": "   ", "codebook_version": "1.0.0"},
+        {"codebook_file": "codebook.json", "codebook_version": "   "},
         {"codebook_file": None, "codebook_version": "1.0.0"},
         {"codebook_file": 1, "codebook_version": "1.0.0"},    # not a string
     ], ids=["empty", "no-file", "no-version", "blank-file", "blank-version",
-            "null-file", "non-string-file"])
+            "whitespace-file", "whitespace-version", "null-file",
+            "non-string-file"])
     def test_an_incomplete_record_exits_2_rather_than_refusing_unfollowably(
             self, tmp_path, capsys, record):
         # Parseable JSON is not a usable record. Without both values the
@@ -930,6 +936,48 @@ class TestRenderCodebookCrossCheck:
         assert "codebook_ref.json" in err        # names the file, and its path
         assert "codebook mismatch" not in err    # never the misleading message
         assert "None" not in err                 # never the unfollowable one
+        assert not (base / "sidecar.json").exists()
+
+    def test_a_non_string_codebook_version_round_trips(self, tmp_path, capsys):
+        """A codebook declaring `"codebook_version": 2` must validate AND render.
+
+        `_load_codebook` constrains only that `codebook_version` is present,
+        never its type, so an integer version is accepted everywhere else in the
+        pipeline — validate-flags prints it, stamps it onto every flag, and
+        writes it into the record verbatim. A reader-side `isinstance(v, str)`
+        would therefore reject a record this tool itself had just written, with
+        a remedy (delete it, re-run validate-flags) that re-creates the same
+        record: a legitimate render refused by an instruction that loops.
+        """
+        cb = tmp_path / "study.json"
+        cb.write_text(json.dumps(dict(MINIMAL_CODEBOOK, codebook_version=2)),
+                      encoding="utf-8")
+        media, base = make_render_dirs(tmp_path)
+        record_codebook(base, "--codebook", str(cb))
+        assert read(base / "work", "codebook_ref.json") == {
+            "codebook_file": "study.json", "codebook_version": 2}
+        capsys.readouterr()
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(cb))) == 0, \
+            capsys.readouterr().err
+        sc = sidecar_of(base)
+        assert sc["codebook_version"] == 2
+        assert sc["codebook_file"] == "study.json"
+
+    def test_a_non_string_version_is_still_cross_checked(self, tmp_path, capsys):
+        # tolerating the type must not mean skipping the comparison
+        cb = tmp_path / "study.json"
+        cb.write_text(json.dumps(dict(MINIMAL_CODEBOOK, codebook_version=2)),
+                      encoding="utf-8")
+        media, base = make_render_dirs(tmp_path)
+        record_codebook(base, "--codebook", str(cb))
+        cb.write_text(json.dumps(dict(MINIMAL_CODEBOOK, codebook_version=3)),
+                      encoding="utf-8")
+        capsys.readouterr()
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(cb))) == 1
+        err = capsys.readouterr().err
+        assert "(2)" in err and "(3)" in err
         assert not (base / "sidecar.json").exists()
 
     def test_main_dispatches_the_cross_check(self, tmp_path, monkeypatch, capsys):
