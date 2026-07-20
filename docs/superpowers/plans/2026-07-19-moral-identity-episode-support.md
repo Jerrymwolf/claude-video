@@ -148,6 +148,8 @@ Expected: FAIL (FileNotFoundError — codebook file doesn't exist).
 
 - [ ] **Step 3: Create the codebook file**
 
+> **AMENDED after code review (commit `383b1fe`) — the shipped file is authoritative, not the JSON block below.** Code review of Task 2 found five Important defects in this block; they were fixed in the shipped `skills/interview/scripts/codebook_moral_identity.json`. Do NOT copy the JSON below into new work. Changes: (a) `arc_schema.turning_point_values` → **`turning_point_special_values: ["off-camera", null]`** — the old key mixed the prose placeholder `"<turn-id>"` into a value enum, so `value in [...]` would accept the placeholder and reject every real turn id; the prose moved to a new `arc_schema.notes` list. (b) Marker-boundary sentences added to `identity_threat`/`identity_bestowal`, `displacement_of_responsibility`/`attribution_of_blame`, and `displacement_of_responsibility`/`identity_defense`, which previously collided (the `'litterbug'` exemplar appeared under two markers; it now appears only under `identity_bestowal`). (c) New **`affect_definitions`** object glossing all 12 vocabulary terms. (d) `aggression_threat`'s definition no longer carries pipeline mechanics; `dehumanization` gained concrete exemplars. (e) `flag_schema.rules` gained a multi-coding rule and a bystander/OTHER rule. The test assertion in Step 1 below (`assert "off-camera" in arc["turning_point_values"]`) was likewise updated to the new key.
+
 Create `skills/interview/scripts/codebook_moral_identity.json`:
 
 ```json
