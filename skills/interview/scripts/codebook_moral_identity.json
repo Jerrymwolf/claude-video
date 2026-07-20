@@ -15,6 +15,20 @@
     "anger", "contempt", "frustration", "anxiety", "fear", "shame",
     "embarrassment", "sadness", "amusement", "pride", "relief", "neutral"
   ],
+  "affect_definitions": {
+    "anger": "Hot hostility toward the other over a perceived wrong; accusatory, raised, or retaliatory wording aimed at the person.",
+    "contempt": "Cold dismissal from assumed superiority — the other is beneath engagement. Unlike anger, there is no heat and no grievance being pressed; the other is not worth arguing with.",
+    "frustration": "Irritation at a blocked goal or a stalled exchange. Unlike anger, it is aimed at the impasse or the situation rather than at the other's character.",
+    "anxiety": "Anticipatory unease about what is coming — exposure, consequences, or escalation not yet realized.",
+    "fear": "Acute alarm at an immediate threat to safety. Unlike anxiety, the danger is present and specific rather than anticipated.",
+    "shame": "Painful self-assessment as a bad person; the self, not merely the act, is experienced as the flaw.",
+    "embarrassment": "Discomfort at being seen violating a norm. Unlike shame, the exposure is the sting rather than the self; it passes with the audience.",
+    "sadness": "Dejection, loss, or resignation; deflated rather than mobilized.",
+    "amusement": "Levity or laughter, whether genuine or deployed to deflect the confrontation.",
+    "pride": "Displayed self-approval — satisfaction in one's own standing, conduct, or handling of the encounter.",
+    "relief": "Tension released once a threat, uncertainty, or confrontation resolves.",
+    "neutral": "No affect evident in the language; the default when wording alone does not support an affect attribution — not a claim that the speaker felt nothing."
+  },
   "markers": [
     {
       "id": "moral_justification",
@@ -40,8 +54,8 @@
     {
       "id": "displacement_of_responsibility",
       "name": "Displacement of responsibility",
-      "definition": "Responsibility is shifted to an authority, role, or circumstance beyond the speaker's agency.",
-      "indicators": ["'that's the store's job'", "'they get paid to do that'", "'not my job'", "incapacity claims offered as excusing conditions"],
+      "definition": "Responsibility is shifted to an authority, role, or impersonal circumstance beyond the speaker's agency. Boundary: here the condition is offered to EXCUSE THE ACT; the same claim offered to DEFEND THE SELF as a good person is identity_defense. One utterance may warrant both codes.",
+      "indicators": ["'that's the store's job'", "'they get paid to do that'", "'not my job'", "incapacity claims offered as excusing conditions ('I have a bad back, I can't walk it over')"],
       "requires_affect": true
     },
     {
@@ -61,14 +75,14 @@
     {
       "id": "dehumanization",
       "name": "Dehumanization",
-      "definition": "The confronter or victim class is stripped of moral regard.",
-      "indicators": ["derogation denying the other's standing as a person worth moral consideration"],
+      "definition": "The confronter or victim class is stripped of moral regard — denied standing as a person whose interests count.",
+      "indicators": ["derogation denying the other's standing as a person worth moral consideration", "'you're nobody'", "'you're not even a person to me'", "addressing the other as an object, animal, or category rather than as a person"],
       "requires_affect": true
     },
     {
       "id": "attribution_of_blame",
       "name": "Attribution of blame",
-      "definition": "The confronter (or circumstances) is recast as the true wrongdoer; condemning the condemner.",
+      "definition": "The confronter or another person is recast as the true wrongdoer; condemning the condemner. Boundary: blame here lands on a PERSON; responsibility shifted onto an impersonal circumstance, role, or authority is displacement_of_responsibility.",
       "indicators": ["'you're harassing me'", "'don't touch my property'", "litigation threats", "reframing the confrontation itself as the offense"],
       "requires_affect": true
     },
@@ -82,21 +96,21 @@
     {
       "id": "aggression_threat",
       "name": "Aggression / threat",
-      "definition": "Verbal aggression or threat of harm toward the confronter; the flag-level evidence for arc escalation phases.",
+      "definition": "Verbal aggression or threat of harm toward the confronter.",
       "indicators": ["explicit threats ('I will hit you')", "profanity-laden aggression directed at the confronter", "physical intimidation narrated in speech"],
       "requires_affect": true
     },
     {
       "id": "identity_threat",
       "name": "Identity threat",
-      "definition": "A speaker impugns the other's moral identity (or a negative identity is imposed).",
-      "indicators": ["'I think you were lying'", "'you were being catatonic'", "'litterbug' labeling", "'your ego won't let you'"],
+      "definition": "A speaker impugns the other's moral identity — attacking, discrediting, or imputing bad character. Boundary: identity_threat ATTACKS an identity the other holds; identity_bestowal CONFERS an identity the other may accept or decline. A negative label that is conferred rather than hurled may satisfy both — code both.",
+      "indicators": ["'I think you were lying'", "'you were being catatonic'", "'your ego won't let you'", "imputations of bad faith or bad character"],
       "requires_affect": true
     },
     {
       "id": "identity_defense",
       "name": "Identity defense",
-      "definition": "A speaker asserts a positive self-claim under threat.",
+      "definition": "A speaker asserts a positive self-claim under threat. Boundary: here the claim DEFENDS THE SELF as a good person; the same claim offered to EXCUSE THE ACT is displacement_of_responsibility. One utterance may warrant both codes.",
       "indicators": ["'I'm not lying'", "'I'm being polite'", "'I'm trying to be as nice as I can be'", "disability/exemption self-claims deployed to protect the self"],
       "requires_affect": true
     },
@@ -110,7 +124,7 @@
     {
       "id": "identity_bestowal",
       "name": "Identity bestowal",
-      "definition": "One speaker grants the other an identity, positive or negative.",
+      "definition": "One speaker grants the other an identity, positive or negative — conferring a status or label the other may accept or decline. Boundary: bestowal CONFERS an identity; identity_threat ATTACKS one the other already holds. A conferred negative label may satisfy both — code both.",
       "indicators": ["'that's actually being a real man'", "'you're better than most'", "handing over a 'litterbug' magnet as labeling act"],
       "requires_affect": true
     },
@@ -137,7 +151,11 @@
   "arc_schema": {
     "phases": ["threat", "defense", "escalation", "softening", "flip", "repair", "exit"],
     "outcomes": ["complies", "refuses", "escalates", "partial", "n/a"],
-    "turning_point_values": ["<turn-id>", "off-camera", null]
+    "turning_point_special_values": ["off-camera", null],
+    "notes": [
+      "turning_point: a turn id from the transcript, or one of arc_schema.turning_point_special_values ('off-camera' when the arc turned before recording began, null when there is no turn)",
+      "escalation phases are evidenced at flag level by aggression_threat flags falling within the episode's span"
+    ]
   },
   "flag_schema": {
     "required": ["id", "marker_types", "quote", "t_start", "t_end", "salience", "speaker_role"],
@@ -145,14 +163,16 @@
     "rules": [
       "id: 'g' + 4-digit sequence, e.g. g0001",
       "marker_types: non-empty list of marker ids from this codebook",
+      "marker_types is a list: when an utterance satisfies more than one marker definition, code all that apply rather than forcing a single choice",
       "speaker_role: canonical label of the quoted speaker; must be in coding_scope",
-      "affect: required iff any marker has requires_affect; must be from affect_vocabulary ('neutral' is the no-signal value)",
+      "affect: required iff any marker has requires_affect; must be from affect_vocabulary ('neutral' is the no-signal value); see affect_definitions for term glosses",
       "quote: verbatim substring of the final transcript, single speaker only",
       "attribution_uncertain: required true when the quoted turn's concordance < 1.0 or label is UNCLEAR",
       "episode_id: assigned by the tool from episodes.json at validate time",
       "t_start/t_end: seconds, within media duration, t_start <= t_end",
       "salience: integer 1-5 per salience_scale",
-      "visual_evidence: one of corroborates|contradicts|neutral, plus a short note — set only after frames are read"
+      "visual_evidence: one of corroborates|contradicts|neutral, plus a short note — set only after frames are read",
+      "bystander episodes are segmentable but their turns are not coded for the defense/identity families; OTHER-labeled turns are never coded at all, since the speaker is unattributable and speaker_role must fall within coding_scope"
     ]
   }
 }
