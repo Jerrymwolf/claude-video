@@ -186,7 +186,7 @@ Read `WORK_DIR/diarized.json` and write `WORK_DIR/episodes.json` as a **top-leve
    "target_descriptor": "woman in garage SUV", "target_speech": true,
    "arc": {"phases": ["threat", "defense", "escalation", "exit"],
            "outcome": "refuses", "turning_point": null}},
-  {"id": "e02", "type": "confrontation", "t_start": 58.4, "t_end": 107.2,
+  {"id": "e02", "type": "confrontation", "t_start": 58.4, "t_end": 101.2,
    "target_descriptor": "man in red truck", "target_speech": true,
    "arc": {"phases": ["threat", "defense", "repair", "exit"],
            "outcome": "complies", "turning_point": "t0012"}},
@@ -194,7 +194,7 @@ Read `WORK_DIR/diarized.json` and write `WORK_DIR/episodes.json` as a **top-leve
 ]
 ```
 
-Those timestamps are not round numbers on purpose — see the snapping rule below. In the transcript behind this example, `58.4` is the start of `t0011` and `107.2` is the start of `t0016`.
+Those timestamps are not round numbers on purpose — see the snapping rule below. In the transcript behind this example, `58.4` is the start of `t0011`, `101.2` is the end of `t0015`, and `107.2` is the start of `t0016`. `e02` therefore closes on its own last turn and `e03` opens on its first, leaving `101.2`–`107.2` uncovered — the legal gap discussed below, silent B-roll between the second confrontation and the wrap-up.
 
 - **Required on every episode:** `id` (`e01`, `e02`, … — unique), `type`, `t_start`, `t_end` (seconds, as numbers — a `"0:00"` video-clock string is rejected).
 - `type` is one of `confrontation`, `commendation`, `bystander`, `to-camera`.
@@ -205,10 +205,23 @@ Those timestamps are not round numbers on purpose — see the snapping rule belo
 Segmentation rules:
 
 - **Non-overlapping and in time order.** Episodes may not overlap and may not run backwards. They need not be contiguous — see the gap rule.
-- **Snap every boundary to a turn boundary**, reading them off finalize's printed turn list. Do not estimate from the video clock and do not round: a boundary landing mid-turn is the single most common way to fail this stage.
-- **Containment is half-open `[t_start, t_end)`** — a turn starting exactly on a shared boundary belongs to the **later** episode. The final episode is end-inclusive so the recording's last turn is never orphaned. That is the rule that makes snapping work: set the boundary to the first turn of the NEW episode, as `e02`'s `58.4` does above.
-- **Gaps between episodes are legal** — silent B-roll holds no turns and needs no episode (the example leaves `104.0`–`107.2` uncovered). What is enforced is coverage of the turns: **every turn's start must fall inside exactly one episode.** A turn starting in a gap is reported as an orphan (`1 turn(s) fall in no episode: t0016 (start 107.2)`).
-- **A turn may not straddle another episode's start** (`1 turn(s) straddle an episode boundary: t0009 (e01 → e02)`). That is a mis-drawn boundary — almost always an un-snapped one — and authoring time is the only point at which it can still be fixed. Move it to the turn boundary the transcript actually supports.
+- **Snap every boundary to a turn boundary**, and take the numbers from `diarized.json`, not from finalize's printed list — that list is rounded to whole seconds (`t0015 [01:30-01:41]`) while the real boundary is `101.2`. Never estimate from the video clock and never round: a boundary landing mid-turn is the single most common way to fail this stage. An episode's **`t_start` snaps to the start of its first turn**; its **`t_end` closes on the end of its last turn** (or anywhere in the silence before the next episode opens).
+- **Containment is half-open `[t_start, t_end)`** — a turn starting exactly on a shared boundary belongs to the **later** episode. The final episode is end-inclusive so the recording's last turn is never orphaned. That is the rule that makes snapping work: at a shared boundary, set it to the first turn of the NEW episode, as `e02`'s `58.4` does above.
+- **Gaps between episodes are legal** — silent B-roll holds no turns and needs no episode, which is why `e02` ends at `101.2` and `e03` only opens at `107.2`. What is enforced is coverage of the turns: **every turn's start must fall inside exactly one episode.** A turn that does start inside that gap is reported as an orphan:
+
+  ```
+  INVALID EPISODES:
+    1 turn(s) fall in no episode: t9999 (start 105.0)
+  ```
+
+- **A turn may not straddle another episode's start.** Guess a round `55.0` for the `e01`/`e02` boundary instead of snapping to `58.4`, and `t0010` — which runs from `50.1` to `56.26` — is cut in half:
+
+  ```
+  INVALID EPISODES:
+    1 turn(s) straddle an episode boundary: t0010 (e01 → e02)
+  ```
+
+  That is a mis-drawn boundary — almost always an un-snapped one — and authoring time is the only point at which it can still be fixed. Move it to the turn boundary the transcript actually supports.
 - **The confronter's to-camera asides INSIDE an ongoing confrontation belong to that confrontation.** A `to-camera` episode is only a stretch with **no active target** (the wrap-up monologue). Narration delivered over a live target stays in that target's episode — the coding pass picks it up through `speaker_role`, not through a separate episode.
 - **`target_speech: false`** (a target who only revs the engine) means code outcome and confronter performance only, and report "no defense repertoire codeable" for that episode. **Never invent target speech.**
 - Ambiguous boundary (a hard cut mid-interaction) → set it at the first turn addressing the new target, and record the uncertainty in the episode's `note`.
@@ -226,7 +239,7 @@ python3 "${SKILL_DIR}/scripts/interview.py" validate-episodes --work WORK_DIR \
 ```
 EPISODES: 3
   e01 confrontation [00:00-00:58] turns=10 target="woman in garage SUV"
-  e02 confrontation [00:58-01:47] turns=5 target="man in red truck"
+  e02 confrontation [00:58-01:41] turns=5 target="man in red truck"
   e03 to-camera [01:47-02:08] turns=2
 ```
 
@@ -297,7 +310,9 @@ Validation gates the frame stage — never proceed past a failing validate.
 
 - `N display turn(s) out of sync with episodes.json — re-run validate-episodes` — `episodes.json` was re-drawn after Step 5 stamped the turns (or Step 5 never ran). Re-run `validate-episodes`, then this stage. Do not hand-edit the stamps.
 - `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first. **You only see that sentence under the default codebook.** Under a codebook declaring `coding_scope`/`enforce_attribution_gate` — including the moral-identity one in the command above — the same stage order raises first, as a traceback ending `ValueError: turns missing label/concordance (run concordance first): t0001, …`. That traceback is the one case where the input file is fine and the **stage order** is wrong; the remedy is the same concordance → validate-episodes → validate-flags.
-- `g0007: t_start 40.0 outside every episode` / `straddles episodes e01 → e02` — the flag's own placement. Fix the timestamps or the boundary and re-run both stages.
+- The flag's own placement — `g0010: t_start 103.0 outside every episode` (its `t_start` fell in a legal gap, where turns may not start but flags evidently did) or `g0010: straddles episodes e01 → e02 (t_start 50.1, t_end 64.48); filed under e01` (a boundary runs through the flag; it is filed under its `t_start`'s episode anyway, and the disagreement is reported rather than resolved silently). Fix the timestamps, or the boundary, and re-run both stages.
+
+Those three are checked in order, and the first two are checked **before** flag placement: a run whose turn layer is out of sync reports drift and stops, so fix drift first and the placement errors — if any — surface on the next run.
 
 ## Step 7 — Frame evidence (video only)
 
