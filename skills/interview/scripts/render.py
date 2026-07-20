@@ -56,10 +56,41 @@ def _run(text: str, bold: bool = False) -> str:
 
 
 def _flag_comment_text(flag: dict) -> str:
+    """One terse pipe-delimited line per flag, for the Word comment.
+
+    The .docx is the human coding surface in document-based review, so every
+    field the flag actually carries belongs here — the sidecar being complete
+    is not enough for a reviewer working from the document alone. Absent fields
+    contribute no segment, so a narrative flag and a moral-identity flag both
+    render without empty gaps.
+
+    `affect` (the moral codebook's declared `affect_field`) is read ahead of
+    `emotion` (the shipped narrative codebook's), and the LABEL follows the key
+    the flag actually carries rather than being normalized to one word: a
+    narrative flag still renders "emotion: anger" exactly as it always did.
+
+    The "GRAVITY" prefix stays literal under every codebook. It is a fixed
+    marker that this line is tool-emitted — the same job w:author does — not a
+    construct name; the marker ids in brackets already identify the construct
+    unambiguously, and the sidecar records `codebook_file`. Deriving it would
+    mean either a new codebook field (out of scope) or synthesizing a label
+    from a filename, and changing it would rewrite every existing narrative
+    .docx for no gain in evidentiary precision.
+    """
     markers = ", ".join(flag.get("marker_types") or [])
     bits = [f"GRAVITY [{markers}]"]
-    if flag.get("emotion"):
-        bits.append(f"emotion: {flag['emotion']}")
+    if flag.get("speaker_role"):
+        bits.append(f"speaker: {flag['speaker_role']}")
+    if flag.get("attribution_uncertain"):
+        # Shown only when set: the codebook requires it TRUE on flags quoting a
+        # turn the panel could not attribute cleanly, so its absence is the
+        # normal state and printing "certain" everywhere would be noise.
+        bits.append("attribution uncertain")
+    if flag.get("episode_id"):
+        bits.append(f"episode: {flag['episode_id']}")
+    affect_field = "affect" if flag.get("affect") else "emotion"
+    if flag.get(affect_field):
+        bits.append(f"{affect_field}: {flag[affect_field]}")
     if flag.get("salience") is not None:
         bits.append(f"salience {flag['salience']}/5")
     bits.append(f"t={format_hms(flag.get('t_start', 0))}-{format_hms(flag.get('t_end', 0))}")
@@ -72,12 +103,18 @@ def _flag_comment_text(flag: dict) -> str:
     return " | ".join(bits)
 
 
-def _paragraph_for_turn(turn: dict, turn_flags: list[tuple[int, dict]]) -> str:
+def _paragraph_for_turn(
+    turn: dict, turn_flags: list[tuple[int, dict]], names: dict | None = None
+) -> str:
     """One <w:p> per turn. Flags whose quote is found in the turn text get a
     comment range around exactly that substring; unfindable quotes anchor the
     whole turn text. Flags are applied left-to-right; overlaps fall back to
-    whole-paragraph anchoring."""
-    header = _run(f"[{format_hms(turn['start'])}] {turn['label']}: ", bold=True)
+    whole-paragraph anchoring.
+
+    `names` maps a canonical role label (INTERVIEWER/INTERVIEWEE/OTHER/UNCLEAR)
+    to a display name for the speaker header; unmapped labels render verbatim."""
+    speaker = (names or {}).get(turn["label"], turn["label"])
+    header = _run(f"[{format_hms(turn['start'])}] {speaker}: ", bold=True)
     text = turn["text"]
 
     spans = []  # (pos, end, comment_id) — non-overlapping, sorted
@@ -123,6 +160,7 @@ def build_docx_parts(
     now: str | None = None,
     claim: str | None = None,
     notes: list[str] | None = None,
+    names: dict | None = None,
 ) -> dict[str, str]:
     """Pure: labeled turns + validated flags → {zip_name: xml_string}.
 
@@ -130,6 +168,10 @@ def build_docx_parts(
     paragraph per entry in `notes`) renders directly under the title — the
     .docx travels alone in document-based coding workflows, so the accuracy
     claim must live in both artifacts, not just the sidecar.
+
+    `names` maps canonical role labels (INTERVIEWER/INTERVIEWEE/OTHER/UNCLEAR)
+    to display names in the speaker headers; unmapped labels render verbatim,
+    so partial maps and `None` both stay backward-compatible.
 
     With no turns, flags still emit comment entries but anchor nowhere
     (orphaned in comments.xml) — callers should not render flag-bearing
@@ -171,7 +213,9 @@ def build_docx_parts(
         for note in notes or []:
             paragraphs.append("<w:p>" + _run(f"Note: {note}") + "</w:p>")
     for turn in turns:
-        paragraphs.append(_paragraph_for_turn(turn, flag_to_turn.get(turn["id"], [])))
+        paragraphs.append(
+            _paragraph_for_turn(turn, flag_to_turn.get(turn["id"], []), names)
+        )
 
     document = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -212,8 +256,23 @@ def build_sidecar(
     partial_failures: list[str],
     codebook_version: str,
     now: str | None = None,
+    speaker_names: dict | None = None,
+    episodes: list[dict] | None = None,
+    persona: str | None = None,
+    codebook_file: str | None = None,
 ) -> dict:
-    """Pure assembly of the machine-readable record. `now` injectable for tests."""
+    """Pure assembly of the machine-readable record. `now` injectable for tests.
+
+    `speaker_names` (role label → display name) is recorded verbatim when
+    non-empty so the artifact is self-describing, but `turns[].label` stays
+    canonical — the research record is role-based, names are a display layer.
+
+    `episodes` (the validated episode list, arcs included) and `persona` (the
+    confronter's per-video character) are recorded when provided, so the
+    artifact is self-describing; empty values read as absent. `codebook_file`
+    is a fixed slot instead, recorded even as None: which codebook produced the
+    record is a fact about the record, and an absent key would only say that
+    the caller did not name one. schema_version 1.1 adds all three."""
     dual = engines.get("groq") and engines.get("openai") and not any(
         ENGINE_SKIPPED in d or TRANSCRIPTION_FAILED in d for d in degradation
     )
@@ -224,8 +283,8 @@ def build_sidecar(
                  "INCOMPLETE — transcription gaps recorded")
     else:
         claim = "dual-engine verified with logged adjudication"
-    return {
-        "schema_version": "1.0",
+    sidecar = {
+        "schema_version": "1.1",
         "interview": {
             "media": media,
             "duration_seconds": duration,
@@ -233,6 +292,10 @@ def build_sidecar(
         },
         "engines": engines,
         "accuracy_claim": claim,
+        # Codebook identity sits here, ahead of the potentially huge flags
+        # array, so a human opening the artifact reads it without scrolling.
+        "codebook_version": codebook_version,
+        "codebook_file": codebook_file,
         "degradation": degradation,
         "partial_failures": partial_failures,
         "segments": segments,
@@ -240,3 +303,10 @@ def build_sidecar(
         "adjudications": adjudications,
         "flags": [dict(copy.deepcopy(f), codebook_version=codebook_version) for f in flags],
     }
+    if persona:
+        sidecar["interview"]["persona"] = persona
+    if episodes is not None:
+        sidecar["episodes"] = copy.deepcopy(episodes)
+    if speaker_names:
+        sidecar["speaker_names"] = dict(speaker_names)
+    return sidecar

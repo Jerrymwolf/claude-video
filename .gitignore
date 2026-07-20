@@ -18,3 +18,6 @@ htmlcov/
 # interview skill outputs (running the skill on media inside the repo)
 *_interview/
 corpus_summary.json
+
+# Git worktrees (isolated workspaces; never tracked)
+.worktrees/

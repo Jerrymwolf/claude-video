@@ -1,7 +1,7 @@
 ---
 name: interview
-version: "0.1.0"
-description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript with narrative-gravity flags — a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
+version: "0.3.0"
+description: Ingest a social-science interview recording (or a folder of them). Produces a dual-engine verified, speaker-diarized transcript coded against a selectable versioned codebook — narrative gravity by default, or moral identity under public confrontation — with an optional episode layer for multi-target recordings. Output is a .docx with anchored comments plus a JSON sidecar. Local media first; URLs allowed for non-sensitive material.
 argument-hint: "<media-file-or-folder> [notes]"
 allowed-tools: Bash, Read, Write, Agent, AskUserQuestion
 homepage: https://github.com/Jerrymwolf/gravitas
@@ -11,9 +11,9 @@ user-invocable: true
 
 # /interview
 
-You are the judgment layer of a research transcription pipeline. Python scripts do everything deterministic; YOU do exactly three judgment jobs: (1) adjudicate disagreements between two Whisper engines, (2) sit as a 3-analyst diarization panel, (3) code the transcript against the narrative-gravity codebook. Every judgment you make is written to a JSON file and retained — you are producing research data, not a chat answer.
+You are the judgment layer of a research transcription pipeline. Python scripts do everything deterministic; YOU do exactly four judgment jobs: (1) adjudicate disagreements between two Whisper engines, (2) sit as a 3-analyst diarization panel, (3) segment the recording into episodes, (4) code the transcript against a versioned codebook. Every judgment you make is written to a JSON file and retained — you are producing research data, not a chat answer.
 
-The pipeline is: `preflight → transcribe → adjudicate → finalize → panel → concordance → gravity → validate-flags → frames → visual evidence → render`. Run the stages in order; each stage prints exactly what you need for the next.
+The pipeline is: `preflight → transcribe → adjudicate → finalize → panel → concordance → episodes → coding → validate-flags → frames → visual evidence → render`. Run the stages in order; each stage prints exactly what you need for the next.
 
 ## Resolve `SKILL_DIR` (do this before any command)
 
@@ -37,6 +37,54 @@ fi
 ```
 
 **Python interpreter:** every `python3 ...` command in this skill is for macOS/Linux. On **Windows**, substitute `python` — the `python3` command on Windows is the Microsoft Store stub and will not run the script.
+
+## Codebook selection (decide once, at Step 1)
+
+Two codebooks ship next to the scripts. A codebook is a versioned data file that **drives behavior** — not documentation:
+
+- `scripts/codebook.json` — **narrative gravity** (emotional display, repetition, quoted speech, temporal shift, disfluency cluster, pause-then-rush). The default. Codes interviewee speech; affect field `emotion`; no episode schema.
+- `scripts/codebook_moral_identity.json` — **moral identity under public confrontation** (Bandura's moral-disengagement mechanisms + responsibility acceptance, identity talk, performance markers). Codes BOTH speaker roles; affect field `affect`; enforces the attribution gate; declares `episode_schema` and `arc_schema`.
+
+The declared fields that change what the tool accepts: `coding_scope`, `affect_field`, `affect_vocabulary`, `enforce_attribution_gate`, `episode_schema`, `arc_schema`, and per-marker `requires_affect`. Read the chosen file fresh each run — never from memory.
+
+`--codebook PATH` selects an alternate codebook, and it exists on exactly three stages: `validate-episodes`, `validate-flags`, and `render`. **Pass the SAME `--codebook` to all three.** Each loads it independently. Two of the three are cross-checked: a successful `validate-flags` records the codebook it used, and `render` refuses (exit 1) when its own `--codebook` disagrees — omitting it at `render` on a moral-identity run is now an error, not a silent `codebook_file: codebook.json`. **`validate-episodes` is not cross-checked at all** — a wrong codebook there validates the episode layer against the wrong schema and nothing catches it. Fix the literal path once, at Step 1, and reuse it verbatim. `corpus-summary` deliberately takes no `--codebook` — it counts what the sidecars themselves record.
+
+### `work/codebook_ref.json` — the codebook provenance record
+
+A **successful** `validate-flags` writes `WORK_DIR/codebook_ref.json` — `{"codebook_file": "…", "codebook_version": "…"}` — naming the codebook that just accepted the flag set. A failing run writes nothing. `render` reads it and refuses to build a research record against a different codebook:
+
+```
+ERROR: codebook mismatch — <…>/work/codebook_ref.json records that validate-flags last accepted a flag set against codebook_moral_identity.json (1.0.0), but render resolved codebook.json (1.0.0). Re-run render with --codebook pointing at codebook_moral_identity.json, or re-run validate-flags with the codebook you mean and then render again.
+```
+
+Nothing is written on a refusal — no `transcript.docx`, no `sidecar.json`.
+
+- **Never hand-write or hand-edit it.** It is a machine-written attestation; editing it to silence a mismatch forges the record's provenance. The honest reset is to re-run `validate-flags` with the codebook you actually mean.
+- It attests to the **codebook only**, not to the current contents of `flags.json` — flags edited after a clean validate are not re-checked by render.
+- **No record → permissive.** A work dir created before this file existed still renders, unchecked.
+- **A structurally unusable record exits 2, not 1** — malformed JSON, or no usable `codebook_file`/`codebook_version` pair (missing, blank, or whitespace-only). That is broken input: nothing was cross-checked. Delete it and re-run `validate-flags`. A non-string `codebook_version` (a codebook declaring `2` rather than `"2"`) is legitimate and is cross-checked normally.
+- It lives in the work dir, which is the audit trail and is **never deleted** (see Retention).
+
+## Exit codes
+
+At the judgment stages, `1` and `2` mean different things and must be handled differently:
+
+- **Exit 1 — a validation finding.** `validate-episodes` prints `INVALID EPISODES:`, `validate-flags` prints `INVALID FLAGS:`, one line per problem. Your judgment file is wrong; fix it per each printed line and re-run.
+- **Exit 1 — `CANNOT VALIDATE:`.** Same exit code, **different meaning and a different remedy.** From `validate-flags` only. It does not say your judgment file is wrong — it says an **earlier stage has not run**, so a check this stage promises could not be performed at all. Do NOT go re-examine your coding. Run the stage the line names, then re-run validate-flags. Both cases fire when `WORK_DIR/diarized.json` is absent, and they fire under **both** codebooks:
+
+  ```
+  CANNOT VALIDATE:
+    work/diarized.json is absent, so the verbatim-quote check cannot run against 2 flag(s) carrying a quote (g0002, g0007) — run concordance, and validate-episodes if this run has an episode layer, before validate-flags
+  ```
+  ```
+  CANNOT VALIDATE:
+    codebook declares coding_scope/enforce_attribution_gate but no turns were supplied — turn-level validation cannot be skipped — work/diarized.json is absent; run concordance before validate-flags
+  ```
+
+  The first fires whenever any flag carries a `quote`; the second when the flag set has no quote to trip the first (an empty flag set) but the codebook declares `coding_scope`/`enforce_attribution_gate`. Remedy for both: `concordance` → `validate-episodes` (if this run has an episode layer) → `validate-flags`. Nothing was validated and no `codebook_ref.json` was written, so **never report the run as clean.**
+- **Exit 2 — broken input.** A missing or malformed `episodes.json`, a `--codebook` path that does not exist or is not a codebook, or a `work/codebook_ref.json` at render that is malformed or carries no usable `codebook_file`/`codebook_version` pair. The message names the file and the exact spot — `ERROR: episodes.json: line 23 column 1 — Illegal trailing comma before end of array`. Nothing was validated. Fix the file or the path; do NOT report this as a finding. (`render --persona ""` is the same class and also exits 2.)
+
+**A crash is not a finding.** `preflight` predates this convention and keeps its own codes (see Step 0). The other hand-authored files — `adjudications.json`, `panel_*.json`, `flags.json` — are not yet routed through the exit-2 path: malformed JSON there surfaces as a raw Python traceback and **exits 1, the same code as a validation finding**, so the exit code alone cannot tell them apart — read the output. A traceback's last line still gives the line and column; re-read the file you just wrote. (One traceback is not about a malformed file at all: a `ValueError: turns missing label/concordance (run concordance first): …` from validate-flags means `diarized.json` is **present but not yet labeled** — the stages were run out of order; see Step 6. An entirely *absent* `diarized.json` is the `CANNOT VALIDATE:` case above, not a traceback.) Never report a traceback as a research result.
 
 ## Step 0 — Preflight
 
@@ -63,7 +111,7 @@ Keys are read from the environment first, then `~/.config/watch/.env`, then `./.
 
 Separate the media source from any notes the user attached (`/interview ~/beis/p017.mp4 second session, same participant` → source = the file, notes = context to keep in mind while coding).
 
-**Always pass the media file's ABSOLUTE path to every subcommand** — resolve it once here and reuse it verbatim through Steps 2–7. Relative paths make the printed frame paths relative and Step 6's `Read` calls cwd-dependent.
+**Always pass the media file's ABSOLUTE path to every subcommand** — resolve it once here and reuse it verbatim through Steps 2–8. Relative paths make the printed frame paths relative and Step 7's `Read` calls cwd-dependent. Fix the `--codebook` path here too (see Codebook selection) and reuse it verbatim at Steps 5, 6, and 8 — a study runs one codebook across its whole corpus.
 
 - **Single file** → proceed to Step 2.
 - **Folder** → run discovery first:
@@ -72,13 +120,20 @@ Separate the media source from any notes the user attached (`/interview ~/beis/p
   python3 "${SKILL_DIR}/scripts/interview.py" discover "<folder>"
   ```
 
-  It prints the media list and a `duplicate_stems` map. Same-stem files (e.g. `p017.mp4` and `p017.wav`) share an output directory and would overwrite each other — when `duplicate_stems` is non-empty, ask the user which file to process per stem (or process only one per stem) before starting. Then run every chosen file **sequentially, in discover's printed order,** through Steps 2–8. If a file hard-fails (both engines fail, unreadable media), continue the batch and record the failure; `corpus-summary` only counts completed sidecars, so your final report MUST name every failed file explicitly — a failed interview must never silently vanish from the corpus count. Batch mode REQUIRES the default output locations (no `--out-dir`): the corpus summary only finds sidecars at `<folder>/*_interview/sidecar.json`. After the last interview:
+  It prints the media list and a `duplicate_stems` map. Same-stem files (e.g. `p017.mp4` and `p017.wav`) share an output directory and would overwrite each other — when `duplicate_stems` is non-empty, ask the user which file to process per stem (or process only one per stem) before starting. Then run every chosen file **sequentially, in discover's printed order,** through Steps 2–9. If a file hard-fails (both engines fail, unreadable media), continue the batch and record the failure; `corpus-summary` only counts completed sidecars, so your final report MUST name every failed file explicitly — a failed interview must never silently vanish from the corpus count. Batch mode REQUIRES the default output locations (no `--out-dir`): the corpus summary only finds sidecars at `<folder>/*_interview/sidecar.json`. After the last interview:
 
   ```bash
   python3 "${SKILL_DIR}/scripts/interview.py" corpus-summary "<folder>"
   ```
 
-  Report the printed summary (interview count, per-interview flag counts and claims, corpus-wide flags by marker and emotion) alongside the per-interview one-liners.
+  It writes `<folder>/corpus_summary.json` and prints the same object. What it reports:
+
+  - `interviews` and `per_interview[]` — one row per completed sidecar: `media`, `flags`, `episodes`, `codebook`, `persona`, `claim`.
+  - `codebooks` (name → interview count), `mixed_constructs` (bool), and `warnings` — a persisted array carrying the same text printed to stderr, so a consumer opening the file months later is told what the terminal said.
+  - `by_codebook` — `flags_by_marker`, `flags_by_affect`, and `episode_outcomes` **disaggregated per codebook**.
+  - Flat rollups: `flags_by_marker`, `flags_by_affect` (plus the back-compat alias `flags_by_emotion`), `episode_outcomes`, `confrontations_with_outcome`, `marker_by_outcome` (keys `"marker|outcome"`), and `personas`.
+
+  **The mixed-vocabulary caveat, and state it plainly in any report you write:** marker vocabularies are codebook-specific. A folder whose sidecars span more than one codebook sets `mixed_constructs: true` and the flat `flags_by_marker` / `marker_by_outcome` tables then **sum incompatible constructs** — they are a retained rollup, not one distribution. Read `by_codebook` (or `per_interview[].codebook`) instead, and never quote a flat marker table for a mixed corpus. The same warning fires when some sidecars record no codebook provenance at all (they resolve to `"unknown"`): their markers cannot be confirmed to share the known codebook's vocabulary. Note also that `episode_outcomes` and `marker_by_outcome` count **confrontation episodes carrying an arc outcome only** — `confrontations_with_outcome` is their shared denominator; flags in non-confrontation episodes still reach `flags_by_marker`.
 - **URL** → allowed only for non-sensitive material (public talks, published oral histories — not confidential participant recordings; those must stay local). Download INTO the directory where the artifacts should live (ask the user if unclear — the interview dir is created next to the media file): `yt-dlp -o "<dir>/%(title)s.%(ext)s" "<url>"`, then treat it as a file. If `yt-dlp` is not installed: `brew install yt-dlp` (macOS) / `pipx install yt-dlp` (Linux).
 - **Audio-only file** (`.m4a`, `.wav`, `.mp3`, `.aac`, `.flac`) → same pipeline; the frame stage skips itself automatically and the sidecar records that no visual evidence was available.
 
@@ -145,17 +200,107 @@ python3 "${SKILL_DIR}/scripts/interview.py" concordance --work WORK_DIR
 
 It needs at least 2 panel files, prints `PANELS` and `LABELS` counts, and one `LOW:` line for every turn that is `UNCLEAR` or has concordance below 1.0. **Do NOT relabel low-concordance turns** — low concordance is a finding, not a defect; the researcher needs to see where the panel split. The resulting `WORK_DIR/diarized.json` carries `label`, `concordance`, `votes`, and `invalid` on every turn.
 
-## Step 5 — Gravity pass (judgment job 3)
+## Step 5 — Episode segmentation (judgment job 3)
 
-Read `"${SKILL_DIR}/scripts/codebook.json"` **fresh each run** (never from memory — the codebook is versioned and may have changed) and `WORK_DIR/diarized.json`. Code **ONLY turns labeled INTERVIEWEE**. For each moment matching one or more codebook markers, build a flag exactly per the codebook's `flag_schema`:
+**Optional for a plain single-interview recording under the default codebook** — one dyad, one continuous interaction, nothing to segment; skip straight to Step 6. Run this step whenever the recording holds **more than one interaction**. A pilot video held eight separate confrontations with eight different people; under plain INTERVIEWER/INTERVIEWEE diarization all eight targets fused into a single pseudo-person, and every per-target claim was silently wrong. Episodes are what keep them apart.
+
+**A single-confrontation video under the moral-identity codebook may also skip it — but don't.** Nothing forces the episode layer: validate-flags and render both succeed without `episodes.json`. What you lose is the record. That sidecar carries no `episodes` key, its flags carry no `episode_id`, and the interview contributes `{}` to the corpus summary's `episode_outcomes` and `marker_by_outcome` — the arc and the outcome, which are the study's per-episode unit of analysis, simply are not written down anywhere. Author one episode covering the whole video and give it an `arc`.
+
+Read `WORK_DIR/diarized.json` and write `WORK_DIR/episodes.json` as a **top-level array** (not `{"episodes": [...]}`), in time order:
+
+```json
+[
+  {"id": "e01", "type": "confrontation", "t_start": 0.0, "t_end": 58.4,
+   "target_descriptor": "woman in garage SUV", "target_speech": true,
+   "arc": {"phases": ["threat", "defense", "escalation", "exit"],
+           "outcome": "refuses", "turning_point": null}},
+  {"id": "e02", "type": "confrontation", "t_start": 58.4, "t_end": 101.2,
+   "target_descriptor": "man in red truck", "target_speech": true,
+   "arc": {"phases": ["threat", "defense", "repair", "exit"],
+           "outcome": "complies", "turning_point": "t0012"}},
+  {"id": "e03", "type": "to-camera", "t_start": 107.2, "t_end": 128.6}
+]
+```
+
+Those timestamps are not round numbers on purpose — see the snapping rule below. In the transcript behind this example, `58.4` is the start of `t0011`, `101.2` is the end of `t0015`, and `107.2` is the start of `t0016`. `e02` therefore closes on its own last turn and `e03` opens on its first, leaving `101.2`–`107.2` uncovered — the legal gap discussed below, silent B-roll between the second confrontation and the wrap-up.
+
+- **Required on every episode:** `id` (`e01`, `e02`, … — unique), `type`, `t_start`, `t_end` (seconds, as numbers — a `"0:00"` video-clock string is rejected).
+- `type` is one of `confrontation`, `commendation`, `bystander`, `to-camera`.
+- **Confrontations additionally require `target_descriptor`** — short and concrete ("woman in garage SUV", "Scott") — **and `target_speech`**, which must be the JSON boolean `true`/`false`.
+- `arc` is optional and belongs on confrontations: `phases` a list drawn from `threat`, `defense`, `escalation`, `softening`, `flip`, `repair`, `exit`; `outcome` one of `complies`, `refuses`, `escalates`, `partial`, `n/a`; `turning_point` a **unit-level turn id as printed by finalize and stored in the sidecar's `turns[]`** — `t0012`, never a merged display id (`m0012`), those exist only inside validate and render and are not in the research record — or the literal `"off-camera"` when the arc turned before the camera ran, or `null`. A codebook declaring `arc_schema` supplies these vocabularies; the ones above are the fallback.
+- `note` is optional and free-form — use it to record a low-confidence boundary.
+
+Segmentation rules:
+
+- **Non-overlapping and in time order.** Episodes may not overlap and may not run backwards. They need not be contiguous — see the gap rule.
+- **Snap every boundary to a turn boundary**, and take the numbers from `diarized.json`, not from finalize's printed list — that list is rounded to whole seconds (`t0015 [01:30-01:41]`) while the real boundary is `101.2`. Never estimate from the video clock and never round: a boundary landing mid-turn is the single most common way to fail this stage. An episode's **`t_start` snaps to the start of its first turn**; its **`t_end` closes on the end of its last turn** (or anywhere in the silence before the next episode opens).
+- **Containment is half-open `[t_start, t_end)`** — a turn starting exactly on a shared boundary belongs to the **later** episode. The final episode is end-inclusive so the recording's last turn is never orphaned. That is the rule that makes snapping work: at a shared boundary, set it to the first turn of the NEW episode, as `e02`'s `58.4` does above.
+- **Gaps between episodes are legal** — silent B-roll holds no turns and needs no episode, which is why `e02` ends at `101.2` and `e03` only opens at `107.2`. What is enforced is coverage of the turns: **every turn's start must fall inside exactly one episode.** A turn that does start inside that gap is reported as an orphan:
+
+  ```
+  INVALID EPISODES:
+    1 turn(s) fall in no episode: t9999 (start 105.0)
+  ```
+
+- **A turn may not straddle another episode's start.** Guess a round `55.0` for the `e01`/`e02` boundary instead of snapping to `58.4`, and `t0010` — which runs from `50.1` to `56.26` — is cut in half:
+
+  ```
+  INVALID EPISODES:
+    1 turn(s) straddle an episode boundary: t0010 (e01 → e02)
+  ```
+
+  That is a mis-drawn boundary — almost always an un-snapped one — and authoring time is the only point at which it can still be fixed. Move it to the turn boundary the transcript actually supports.
+- **The confronter's to-camera asides INSIDE an ongoing confrontation belong to that confrontation.** A `to-camera` episode is only a stretch with **no active target** (the wrap-up monologue). Narration delivered over a live target stays in that target's episode — the coding pass picks it up through `speaker_role`, not through a separate episode.
+- **`target_speech: false`** (a target who only revs the engine) means code outcome and confronter performance only, and report "no defense repertoire codeable" for that episode. **Never invent target speech.**
+- Ambiguous boundary (a hard cut mid-interaction) → set it at the first turn addressing the new target, and record the uncertainty in the episode's `note`.
+- Two targets genuinely interleaving → split at the finest boundary the transcript supports; if inseparable, one episode with a `note` — never silently merged into a third pseudo-target.
+
+Then validate:
+
+```bash
+python3 "${SKILL_DIR}/scripts/interview.py" validate-episodes --work WORK_DIR \
+  --codebook "${SKILL_DIR}/scripts/codebook_moral_identity.json"
+```
+
+`--codebook` is optional; omit it to validate against the shipped codebook's fallback schema. Clean, it prints one line per episode **with the turn count each captured** — check those counts against your own reading before moving on:
+
+```
+EPISODES: 3
+  e01 confrontation [00:00-00:58] turns=10 target="woman in garage SUV"
+  e02 confrontation [00:58-01:41] turns=5 target="man in red truck"
+  e03 to-camera [01:47-02:08] turns=2
+```
+
+(The printed time range is `format_hms`-rounded to whole seconds; `episodes.json` keeps your exact values.)
+
+On errors it prints `INVALID EPISODES:` and exits 1 — fix `episodes.json` per each printed line and re-run **until the table prints**. Repeated identical problems are summarized as one capped line (`+N more`), so fix the cause, not the symptom count.
+
+A clean run also **stamps `episode_id` onto every turn** in `diarized.json`. That stamp is what Step 6 reconciles against, so **any re-drawing of `episodes.json` means re-running this stage** before validate-flags.
+
+## Step 6 — Coding pass (judgment job 4)
+
+Read the codebook you fixed in Step 1 **fresh each run** (never from memory — codebooks are versioned and may have changed) and `WORK_DIR/diarized.json`. For each moment matching one or more of that codebook's markers, build a flag exactly per its `flag_schema`:
 
 - `id`: `g0001`, `g0002`, … — sequential and **unique** (duplicates are rejected by validation).
-- `marker_types`: non-empty list of marker ids from the codebook.
-- `quote`: **verbatim substring of the interviewee's speech** — no paraphrase. May span consecutive sentences by the same speaker; must never cross a speaker change.
+- `marker_types`: non-empty list of marker ids **from this codebook**. When an utterance satisfies more than one definition, code all that apply rather than forcing a single choice.
+- `quote`: **verbatim substring of the speaker's speech** — no paraphrase. May span consecutive sentences by the same speaker; must never cross a speaker change.
 - `t_start`/`t_end`: seconds, within the media duration.
-- `salience`: integer 1–5 per the codebook's scale. Reserve 5 for genuinely interview-defining moments.
-- `emotion`: required **iff** `marker_types` includes `emotional_display`; must come from the codebook's emotions list.
+- `salience`: integer 1–5 per the codebook's scale. Reserve 5 for genuinely defining moments.
+- **Affect — the codebook names both the field and the vocabulary.** Under the shipped codebook the field is `emotion`, required iff `marker_types` includes `emotional_display`, drawn from its `emotions` list. Under a codebook declaring `affect_field` (the moral-identity codebook declares `affect`), that field is the only one checked and `affect_vocabulary` is the only vocabulary — a stale `emotions` key is ignored. It is required by **every marker carrying `requires_affect: true`**, which in the moral-identity codebook is 14 of its 16 markers — the only exceptions are `audience_address` and `camera_awareness`. `neutral` is the explicit no-signal value, not an omission.
+- `speaker_role`: see coding scope below.
+- `attribution_uncertain`: see the attribution gate below.
 - `note`: optional, brief.
+- Do **not** write `episode_id` yourself — validate-flags stamps it from `episodes.json`.
+
+**Coding scope.** A codebook's `coding_scope` declares which speaker roles get coded. The shipped codebook declares none, and the rule is this contract's: code **ONLY turns labeled INTERVIEWEE** (nothing machine-checks that under the default codebook — the discipline is yours). The moral-identity codebook declares `["INTERVIEWEE", "INTERVIEWER"]`, so the confronter's speech is in scope too and **every flag must carry `speaker_role`** — the canonical label (`INTERVIEWER` / `INTERVIEWEE`) of the turn the quote came from. Validation then requires the quote to be found in a turn actually bearing that role; a flag omitting `speaker_role` is itself a finding. `OTHER` and `UNCLEAR` turns are never coded under any codebook — the speaker is unattributable.
+
+**The attribution gate.** When a codebook sets `enforce_attribution_gate` (the moral-identity codebook does), any flag whose quoted turn has `concordance < 1.0` or label `UNCLEAR` must carry `"attribution_uncertain": true` — the **JSON boolean `true`, not the string `"true"`**, which is rejected exactly like a missing key:
+
+```
+g0007: quoted turn m0008 has concordance 0.6667 — flag must set attribution_uncertain: true
+```
+
+Do not answer that by relabeling the turn or dropping the flag. The panel split is a finding, and this field is how the record carries it forward honestly. Step 4's `LOW:` lines are your list of the turns this applies to.
 
 Expect roughly 5–20 flags for a 60-minute interview. **Zero flags is a valid outcome** for a flat interview — do not invent gravity to have something to show. Write the flags to `WORK_DIR/flags.json` as a **top-level array** (not `{"flags": [...]}`):
 
@@ -165,21 +310,49 @@ Expect roughly 5–20 flags for a 60-minute interview. **Zero flags is a valid o
 ]
 ```
 
+Under the moral-identity codebook a flag carries the two extra fields:
+
+```json
+[
+  {"id": "g0002", "marker_types": ["displacement_of_responsibility"], "quote": "That is the store's job, they get paid to do that.", "t_start": 15.1, "t_end": 19.8, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration"},
+  {"id": "g0007", "marker_types": ["diffusion_of_responsibility"], "quote": "Everyone does it, people leave carts all the time.", "t_start": 40.2, "t_end": 49.6, "salience": 4, "speaker_role": "INTERVIEWEE", "affect": "frustration", "attribution_uncertain": true}
+]
+```
+
 Then validate:
 
 ```bash
-python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR [--duration <seconds>]
+python3 "${SKILL_DIR}/scripts/interview.py" validate-flags --work WORK_DIR [--duration <seconds>] \
+  --codebook "${SKILL_DIR}/scripts/codebook_moral_identity.json"
 ```
 
-`--duration` is optional — when omitted it is auto-derived from the final transcript's last segment. Pass it explicitly for exactness: get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. Quotes are checked verbatim against the diarized transcript (merged same-speaker view) — a paraphrase fails validation. A quote may span consecutive sentences by the SAME speaker, but must never cross a speaker change. On errors, fix `flags.json` per each printed line and re-run until it prints `OK`. Validation gates the frame stage — never proceed past a failing validate.
+`--codebook` must be the same one you coded against — pointing it at the other codebook turns every marker id into `unknown marker '...'`. `--duration` is optional; when omitted it is auto-derived from the final transcript's last segment. Pass it explicitly for exactness: get `<seconds>` from `ffprobe -v error -show_entries format=duration -of csv=p=0 "<media>"`. Quotes are checked verbatim against the diarized transcript (merged same-speaker view) — a paraphrase fails validation. A quote may span consecutive sentences by the SAME speaker, but must never cross a speaker change. On errors, fix `flags.json` per each printed line and re-run until it prints the OK line, which names the codebook it actually used — read that filename and confirm it is the one you meant:
 
-## Step 6 — Frame evidence (video only)
+```
+OK: 9 flags valid against codebook 1.0.0 (codebook_moral_identity.json)
+```
+
+That OK line is also when `WORK_DIR/codebook_ref.json` gets written, recording the codebook just named so `render` can refuse a different one. A rejected run writes no record — so a work dir with no `codebook_ref.json` has never had a flag set accepted in it.
+
+`WORK_DIR/diarized.json` must be present, or this stage refuses with `CANNOT VALIDATE:` (exit 1) rather than validating — see Exit codes.
+
+Validation gates the frame stage — never proceed past a failing validate.
+
+**When `WORK_DIR/episodes.json` exists**, this stage also reconciles the two layers and stamps `episode_id` onto every flag. Three refusals to know, all exit 1:
+
+- `N display turn(s) out of sync with episodes.json — re-run validate-episodes` — `episodes.json` was re-drawn after Step 5 stamped the turns (or Step 5 never ran). Re-run `validate-episodes`, then this stage. Do not hand-edit the stamps.
+- `episodes.json is present but there is no labeled turn layer to reconcile it against` — run concordance, then validate-episodes, first. **You only see that sentence under the default codebook**, and only when `diarized.json` exists but its turns are not yet labeled (or the flag set is empty, so nothing tripped the quote check first). Under a codebook declaring `coding_scope`/`enforce_attribution_gate` — including the moral-identity one in the command above — that same present-but-unlabeled turn layer raises first, as a traceback ending `ValueError: turns missing label/concordance (run concordance first): t0001, …`. That traceback is the one case where the input file is fine and the **stage order** is wrong; the remedy is the same concordance → validate-episodes → validate-flags. A `diarized.json` that is **absent entirely** takes neither path under either codebook — it prints `CANNOT VALIDATE:` (see Exit codes).
+- The flag's own placement — `g0010: t_start 103.0 outside every episode` (its `t_start` fell in a legal gap, where turns may not start but flags evidently did) or `g0010: straddles episodes e01 → e02 (t_start 50.1, t_end 64.48); filed under e01` (a boundary runs through the flag; it is filed under its `t_start`'s episode anyway, and the disagreement is reported rather than resolved silently). Fix the timestamps, or the boundary, and re-run both stages.
+
+Those three are checked in order, and the first two are checked **before** flag placement: a run whose turn layer is out of sync reports drift and stops, so fix drift first and the placement errors — if any — surface on the next run.
+
+## Step 7 — Frame evidence (video only)
 
 ```bash
 python3 "${SKILL_DIR}/scripts/interview.py" frames "<media>"
 ```
 
-For audio-only media this prints a skip note and exits 0 — go straight to Step 7. For video, it extracts a ~5-frame burst around each flag's midpoint into `frames/<flag_id>/`, prints the path of every frame (absolute, given the absolute-media rule in Step 1), and writes the relative paths (plus a `frames_missing` count for any frames that could not be extracted) back into `flags.json`.
+For audio-only media this prints a skip note and exits 0 — go straight to Step 8. For video, it extracts a ~5-frame burst around each flag's midpoint into `frames/<flag_id>/`, prints the path of every frame (absolute, given the absolute-media rule in Step 1), and writes the relative paths (plus a `frames_missing` count for any frames that could not be extracted) back into `flags.json`.
 
 `Read` every printed frame (batch per flag when there are many — see Token efficiency), using parallel tool calls so you see each flag's burst together. Then, for each flag, set `"visual_evidence"` in `WORK_DIR/flags.json` to one of:
 
@@ -189,11 +362,16 @@ For audio-only media this prints a skip note and exits 0 — go straight to Step
 
 **NEVER delete a flag because frames contradict it.** Record the contradiction — the sidecar keeps both signals, and the disagreement between text and video is itself research data.
 
-## Step 7 — Render
+## Step 8 — Render
 
 ```bash
-python3 "${SKILL_DIR}/scripts/interview.py" render "<media>"
+python3 "${SKILL_DIR}/scripts/interview.py" render "<media>" \
+  --codebook "${SKILL_DIR}/scripts/codebook_moral_identity.json" \
+  --persona "Agent Greg Gorey" \
+  --interviewer "Agent Greg Gorey" --interviewee "Target"
 ```
+
+(`--codebook`, `--persona`, and the four name flags are all optional; the bare `render "<media>"` is the default-codebook form.)
 
 Prints `DOCX:` and `SIDECAR:` paths and `CLAIM:` — the accuracy claim, exactly one of:
 
@@ -201,19 +379,49 @@ Prints `DOCX:` and `SIDECAR:` paths and `CLAIM:` — the accuracy claim, exactly
 - `dual-engine verified with logged adjudication; INCOMPLETE — transcription gaps recorded`
 - `single-engine UNVERIFIED`
 
-The .docx is the speaker-labeled transcript with gravity flags anchored as comments; the sidecar is the full machine-readable record (segments, turns with concordance, adjudication audit log, flags with visual evidence, degradation, partial failures, codebook version).
+The .docx is the speaker-labeled transcript with coded flags anchored as comments. The sidecar is the full machine-readable record, **schema 1.1**: `interview` (media, duration, processed_at, and `persona` when given), `engines`, `accuracy_claim`, top-level `codebook_version` and `codebook_file`, `degradation`, `partial_failures`, `segments`, `turns` (with concordance, votes, and `episode_id` when the episode layer ran), `adjudications`, `flags` (with visual evidence and `episode_id`), plus `episodes` (the validated list, arcs included) when `episodes.json` exists and `speaker_names` when names were passed. `codebook_file` is always recorded, because which codebook produced the record is a fact about the record; both shipped codebooks are independently at version `1.0.0`, so the **filename**, not the version, is what carries identity.
 
-## Step 8 — Report to the user
+**The sidecar is still the complete record, but the .docx comment now carries most of the flag.** Under a hardcoded `GRAVITY [...]` heading it prints, in this order and omitting any segment the flag does not carry: marker list, `speaker:`, `attribution uncertain` (only when true), `episode:`, affect, `salience`, time range, note, visual evidence, frame count. Two real comment lines from a moral-identity render:
+
+```
+GRAVITY [displacement_of_responsibility] | speaker: INTERVIEWEE | episode: e01 | affect: frustration | salience 4/5 | t=00:15-00:19 | deflects to store policy | visual: corroborates — jaw set, gestures at the cart | frames: 5
+GRAVITY [diffusion_of_responsibility] | speaker: INTERVIEWEE | attribution uncertain | episode: e01 | affect: frustration | salience 4/5 | t=00:40-00:49 | visual: neutral — subject off-frame | frames: 5
+```
+
+The affect segment is **labelled by the field the flag actually carries** — `affect: frustration` for a moral-identity flag, `emotion: grief` for a narrative one — so the narrative .docx is unchanged from before:
+
+```
+GRAVITY [emotional_display] | emotion: grief | salience 4/5 | t=12:34-12:41 | frames: 5
+```
+
+One caveat remains, and it is codebook-agnostic: **the `GRAVITY` heading is hardcoded and does not change with the codebook**, so a moral-identity .docx says `GRAVITY` too. It is a fixed "tool-emitted" marker, not a construct name — the marker ids in brackets identify the construct, and the sidecar records `codebook_file`. Say that if you hand the .docx to a human coder for a moral-identity study; do not let anyone read the heading as the study's construct.
+
+**Codebook (`--codebook PATH`).** Pass the SAME codebook you validated against. render loads it independently, but it now cross-checks itself against `work/codebook_ref.json` — the record a successful `validate-flags` wrote — and **refuses (exit 1), writing nothing**, when the two disagree. Omitting the flag on a moral-identity run is therefore an error you will see, not a corrupt record you will not. Re-run render with the `--codebook` the error names; render is pure assembly and safe to repeat. See `work/codebook_ref.json` under Codebook selection for the record's rules (and the exit-2 unusable-record case).
+
+**Persona (`--persona NAME`).** The confronter's per-video character — "Agent Greg Gorey", "RoboNarc". It is recorded as `interview.persona` in the sidecar and rolls up into the corpus summary's `personas` list and each `per_interview[].persona`. **A persona is metadata — never a role and never a label.** `turns[].label` stays canonical, `coding_scope` still speaks in `INTERVIEWER`/`INTERVIEWEE`, and persona *work* in the speech is coded through the `audience_address` marker, not through this flag. Omit the flag entirely when a video has no persona: passing an empty string is rejected (exit 2) rather than recorded as a persona that is the empty string. If you also want the persona shown in the .docx headers, that is the separate `--interviewer` display name below.
+
+**Optional speaker names.** By default the .docx headers read `INTERVIEWER:` / `INTERVIEWEE:` (and `OTHER:` / `UNCLEAR:`). Pass display names to relabel them — useful when the dyad has known participants or the recording isn't a literal interview:
+
+```bash
+python3 "${SKILL_DIR}/scripts/interview.py" render "<media>" \
+  --interviewer "Interviewer" --interviewee "Participant"
+```
+
+`--other` and `--unclear` rename those labels too; any flag you omit keeps its canonical role label. This is a **display layer only** — the sidecar's `turns[].label` stays role-based (the research record), and the chosen names are recorded under a `speaker_names` key so the artifact is self-describing. Names are purely a render concern; re-run `render` with different names any time without re-transcribing. Note that a single INTERVIEWEE label covers whoever is in the interviewee role — in a multi-party recording (e.g. one host confronting several people) every non-host turn shares one name, so names fit true dyads best.
+
+## Step 9 — Report to the user
 
 Per interview, report:
 
 - **The accuracy claim, verbatim from render output.** Never soften it, never upgrade it.
+- The codebook you coded against, by filename and version (the OK line from validate-flags).
 - Engine disagreement count and how many adjudications were nontrivial (synthesized corrections, deletions).
-- Diarization label counts, plus any `UNCLEAR` or low-concordance turns with timestamps.
+- Diarization label counts, plus any `UNCLEAR` or low-concordance turns with timestamps — and, when the attribution gate is on, how many flags carry `attribution_uncertain`.
+- When the episode layer ran: the episode count by type, each confrontation's target descriptor and arc outcome, and any episode whose `target_speech` is false (report "no defense repertoire codeable" for it rather than a thin profile).
 - Flag count by marker type; the top-salience moments with timestamps and a one-line description each.
 - Artifact paths (`transcript.docx`, `sidecar.json`).
 
-Batch mode: one line per interview (media, claim, flag count), then the corpus summary from `corpus-summary` (flags by marker and by emotion across the corpus).
+Batch mode: one line per interview (media, claim, codebook, flag count, episode count), then the corpus summary from `corpus-summary`. If it reported `mixed_constructs: true`, **say so and report from `by_codebook`** — quoting the flat marker table for a mixed corpus sums incompatible constructs. Reproduce any `warnings` entry verbatim.
 
 ## Retention
 
@@ -222,11 +430,16 @@ Batch mode: one line per interview (media, claim, flag count), then the corpus s
 ## Failure modes
 
 - **One engine keyless or failed** → the pipeline continues single-engine (the diff self-compares, so there is nothing to adjudicate). The degradation is recorded in the sidecar and the claim becomes `single-engine UNVERIFIED`. Your report MUST carry that phrase.
-- **Some transcription chunks failed** → recorded in the sidecar's `partial_failures`; the claim gains `INCOMPLETE — transcription gaps recorded`. Note the gaps in your report.
+- **Some transcription chunks failed** → recorded in the sidecar's `partial_failures`. On a dual-engine run the claim gains `INCOMPLETE — transcription gaps recorded`; on a single-engine run it does NOT — the claim stays the plain `single-engine UNVERIFIED`, which swallows the gap. Report the gaps from `partial_failures` either way; do not infer them from the claim.
 - **finalize raises on adjudications** → your `adjudications.json` has missing or unknown ids. Fix the file to cover exactly the printed disagreement ids; do not edit `diff.json`.
 - **A panel file won't parse** → concordance dies on malformed JSON. Save the JSON object from that analyst's reply (labels verbatim); if nothing usable, re-dispatch that one analyst once, or proceed with the 2 usable panels and note the lost analyst in your report.
 - **A batch file hard-fails** (both engines fail, unreadable media) → continue the batch and record the failure; name every failed file explicitly in your final report — `corpus-summary` only counts completed sidecars.
 - **validate-flags rejects** → fix `flags.json` per the printed errors and re-run. Never bypass validation.
+- **`validate-flags` prints `CANNOT VALIDATE:`** → `work/diarized.json` is absent, so a check this stage promises could not run. Your coding may be fine. Run `concordance` (then `validate-episodes`, if this run has an episode layer), then validate-flags. Exit 1, nothing validated, no `codebook_ref.json` written — do not report the run as clean.
+- **validate-episodes rejects** → fix `episodes.json` per the printed errors and re-run until the episode table prints. Repeated problems are capped into one summary line — fix the cause (usually one mistyped timestamp), not each symptom.
+- **A stage exits 2** → broken input, not a finding: a missing/malformed `episodes.json`, a bad `--codebook` path, or an unusable `work/codebook_ref.json` at render. Nothing was validated. See Exit codes.
+- **`validate-flags` reports episode drift** → `episodes.json` changed after the turns were stamped, or `validate-episodes` never ran. Re-run `validate-episodes`, then `validate-flags`. Never hand-edit `episode_id` in `diarized.json` or `flags.json`.
+- **`render` reports `codebook mismatch`** → its `--codebook` is not the one `work/codebook_ref.json` says `validate-flags` accepted. Exit 1, nothing written. Re-run render with the codebook the error names, or — if the *validation* used the wrong one — re-run `validate-flags` with the codebook you mean and then render. Never hand-edit the record to make the two agree. This guard covers `validate-flags` ↔ `render` only: a wrong `--codebook` at **`validate-episodes`** is still caught by nothing, so check that one yourself.
 - **Frames missing for a flag** → `frames_missing` is recorded on the flag; assess visual evidence from the frames that did extract, or mark it `neutral` if none did.
 - **Never claim the transcript is "error-free"** — no ASR pipeline is. The honest claim is whatever render prints, and that is what you report.
 
@@ -235,7 +448,9 @@ Batch mode: one line per interview (media, claim, flag count), then the corpus s
 This skill burns tokens primarily on frame reading. Order of magnitude: a 20-flag video interview yields up to ~100 frames, roughly 200 image tokens each at 512px; the transcript stages are cheap by comparison.
 
 - **More than ~10 flags** → do not read every frame in one message. Read frames in per-flag batches, ordered by salience (highest first), and record each flag's `visual_evidence` before moving to the next batch.
-- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-flags and frames need `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json`.
+- **Batch mode accumulates context** across interviews, but every stage's inputs persist on disk, so a FRESH session can resume any interview from its work dir: finalize needs `work/diff.json` + `work/adjudications.json`; concordance needs `work/turns.json` + `work/panel_*.json`; validate-episodes needs `work/diarized.json` + `work/episodes.json`; **validate-flags needs `work/flags.json` AND `work/diarized.json`** (plus `work/final_transcript.json` if you want the duration auto-derived, and `work/episodes.json` when the episode layer ran); frames needs `work/flags.json`; render needs `work/diarized.json`, `work/flags.json`, `work/final_transcript.json`, `work/audit_log.json`, and `work/diff.json` (plus `work/episodes.json` when the episode layer ran, and it reads `work/codebook_ref.json` — written by the last successful `validate-flags` — to cross-check its own `--codebook`). Any resumed stage that takes `--codebook` needs the same one the run started with — `work/codebook_ref.json` names it, and so does a completed interview's sidecar, as `codebook_file`.
+
+  **`diarized.json` is not optional at validate-flags, and its absence now fails CLOSED.** The verbatim-quote check exists only when that file is there, so without it the stage refuses rather than validating: resume with `flags.json` alone and you get `CANNOT VALIDATE:` and exit 1 under **both** codebooks — no `OK:` line, no `codebook_ref.json`, nothing for render to build on. That is the correct behavior, and the reason to supply the turn layer is unchanged: **a resumed session must still bring `diarized.json`, or the coding pass cannot be validated at all.** Re-run `concordance` (and `validate-episodes`, if this run has an episode layer) from the work dir first. If you are unsure what a resumed work dir holds, `ls` it before running anything.
 - **If context runs low mid-batch** → finish the interview in progress through render, report which files remain unprocessed, and tell the user to re-invoke `/interview` on the remainder.
 
 ## Security & Permissions
@@ -255,6 +470,6 @@ This skill burns tokens primarily on frame reading. Order of magnitude: a 20-fla
 - Does not log, cache, or write API keys to stdout, stderr, or output files
 - Does not delete the work directory, `transcript.docx`, or `sidecar.json` — retention is a hard rule (see Retention). Two replace-in-place exceptions, both covered in Retention: a frames re-run regenerates a flag's `cue_*.jpg` images, and a user-confirmed transcribe re-run replaces the prior engine/diff record
 
-**Bundled scripts:** `scripts/interview.py` (CLI entry point; all subcommands), `scripts/dual_transcribe.py` (dual-engine orchestration, transcript diff, adjudication application), `scripts/analyze.py` (turn building, panel concordance, flag validation, frame-burst timing), `scripts/render.py` (.docx with anchored comments + JSON sidecar), `scripts/stt.py` (Groq/OpenAI Whisper clients), `scripts/framegrab.py` (ffmpeg frame extraction), `scripts/codebook.json` (narrative-gravity codebook v1.0.0). All pure stdlib — no third-party Python packages.
+**Bundled scripts:** `scripts/interview.py` (CLI entry point; all subcommands), `scripts/dual_transcribe.py` (dual-engine orchestration, transcript diff, adjudication application), `scripts/analyze.py` (turn building, panel concordance, flag validation, frame-burst timing), `scripts/render.py` (.docx with anchored comments + JSON sidecar), `scripts/stt.py` (Groq/OpenAI Whisper clients), `scripts/framegrab.py` (ffmpeg frame extraction), `scripts/codebook.json` (narrative-gravity codebook v1.0.0, the default), `scripts/codebook_moral_identity.json` (moral-identity-under-confrontation codebook v1.0.0, selected with `--codebook`). All pure stdlib — no third-party Python packages.
 
 Review scripts before first use to verify behavior.
