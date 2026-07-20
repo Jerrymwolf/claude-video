@@ -136,7 +136,8 @@ def _find_quote_turn(flag: dict, turns: list[dict], label: str | None = None) ->
     """The turn containing the flag's quote that best matches its timespan.
 
     Candidates are turns whose text contains the quote (optionally restricted to
-    a label) and whose span falls inside the flag's [t_start-2, t_end+2] window
+    a label) and whose span INTERSECTS the flag's [t_start-2, t_end+2] window —
+    overlapping it anywhere is enough; the turn need not be contained in it
     (mirrors the docx anchor slop). The winner is the candidate with the MOST
     temporal overlap, first match breaking ties: short quotes ("Yeah.", "No.")
     recur constantly in confrontation transcripts, and resolving to a merely
@@ -198,8 +199,10 @@ def validate_flags(
       ["INTERVIEWEE"]. Merely declaring this key turns the check on; so does
       listing `speaker_role` in `flag_schema.required`. Either alone is
       sufficient — the check does not wait for the schema to require the
-      field. It runs only on flags that actually carry a `speaker_role`;
-      a missing one is reported by the required-field check instead.
+      field. A flag omitting `speaker_role` entirely is still reported —
+      by the required-field check when the schema requires it, otherwise by
+      the scope check itself, so declaring `coding_scope` alone is enough to
+      make an unattributed flag a finding.
     - `enforce_attribution_gate` — demands `attribution_uncertain: true` on
       flags whose quoted turn has concordance < 1.0 or label UNCLEAR, and
       reports a flag whose quote resolves to no turn at all. Default False.
@@ -270,6 +273,14 @@ def validate_flags(
                 errors.append(f"{ref}: {affect_field} '{value}' not in codebook vocabulary")
         role = flag.get("speaker_role")
         cited: dict | None = None  # the turn the speaker_role check resolved, if any
+        if check_role and not role and "speaker_role" not in required:
+            # `coding_scope` is a declaration that speaker attribution matters.
+            # Without this, a flag that simply omits `speaker_role` is checked by
+            # neither the scope check nor the required-field check, and a quote
+            # from an out-of-scope speaker validates clean. The `not in required`
+            # guard avoids double-reporting the schema's own missing-field error.
+            errors.append(f"{ref}: codebook declares coding_scope but flag has "
+                          f"no speaker_role")
         if check_role and role:
             if role not in scope:
                 errors.append(f"{ref}: speaker_role '{role}' not in coding scope {sorted(scope)}")

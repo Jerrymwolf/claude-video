@@ -188,6 +188,29 @@ class TestCodebookDrivenValidation:
         errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
         assert any("no INTERVIEWEE turn near" in e for e in errs), errs
 
+    def test_flag_just_past_the_turn_is_rejected_at_the_slop_edge(self):
+        # Symmetric sibling of the "before" case: 3s AFTER m0002 ends, just past
+        # the +2s slop. The pre-existing sibling sits 21s away, which a widened
+        # window would still reject — this one pins the +2.0 itself.
+        f = moral_flag(t_start=12.0, t_end=14.0)
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("no INTERVIEWEE turn near" in e for e in errs), errs
+
+    def test_ties_go_to_the_first_candidate_not_the_last(self):
+        # Two turns with identical spans both contain the quote, so overlap ties.
+        # The docstring promises the FIRST match wins; a `>=` comparison would
+        # silently switch to the last and read a different turn's concordance.
+        turns = [
+            {"id": "m0001", "start": 5.0, "end": 9.0, "text": "Yeah.",
+             "label": "INTERVIEWEE", "concordance": 0.5},
+            {"id": "m0002", "start": 5.0, "end": 9.0, "text": "Yeah.",
+             "label": "INTERVIEWEE", "concordance": 1.0},
+        ]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag(quote="Yeah.")], cb, 100.0, turns=turns)
+        assert any("m0001" in e and "attribution_uncertain" in e for e in errs), errs
+        assert not any("m0002" in e for e in errs), errs
+
     def test_flag_just_before_the_turn_but_inside_the_slop_still_resolves(self):
         # Pins the `- 2.0` itself, not merely the existence of a lower bound:
         # ending 1s before the turn starts is inside the slop and must resolve.
@@ -286,6 +309,28 @@ class TestCodebookDrivenValidation:
         errs = validate_flags([f], cb, 100.0, turns=TURNS)
         assert any("not in coding scope" in e for e in errs), errs
 
+    def test_missing_speaker_role_under_coding_scope_is_reported(self):
+        # coding_scope declared but speaker_role merely optional: without an
+        # explicit check, a flag omitting speaker_role is caught by NEITHER the
+        # scope check (which needs a role) nor the required-field check, so an
+        # out-of-scope quote validates clean.
+        cb = dict(MINI_MORAL, coding_scope=["INTERVIEWEE"],
+                  flag_schema={"required": ["id", "marker_types", "quote", "t_start",
+                                            "t_end", "salience"]})
+        f = moral_flag(quote="Why is this cart here?", t_start=0.0, t_end=4.0)
+        f.pop("speaker_role")
+        errs = validate_flags([f], cb, 100.0, turns=TURNS)
+        assert any("no speaker_role" in e for e in errs), errs
+
+    def test_missing_speaker_role_is_not_double_reported_when_required(self):
+        # The schema already emits "missing required field" on this path; the
+        # coding_scope check must not pile a second message on top of it.
+        f = moral_flag()
+        f.pop("speaker_role")
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        role_errs = [e for e in errs if "speaker_role" in e]
+        assert role_errs == ["g0001: missing required field 'speaker_role'"], errs
+
     def test_coding_scope_defaults_to_interviewee_only(self):
         cb = {k: v for k, v in MINI_MORAL.items() if k != "coding_scope"}
         assert validate_flags([moral_flag()], cb, 100.0, turns=TURNS) == []
@@ -375,13 +420,13 @@ class TestAttributionGate:
                   "text": "Don't touch my property.", "label": "UNCLEAR",
                   "concordance": 1.0, "segment_indices": [0]}]
         errs = validate_flags([self._no_role()], self.GATED_NO_ROLE, 100.0, turns=turns)
-        assert any("attribution_uncertain" in e for e in errs)
-        # the message must name the real trigger, not report "concordance 1.0"
-        assert any("UNCLEAR" in e for e in errs)
+        # one message must carry both: the demand AND the real trigger, so the
+        # gate cannot report "concordance 1.0" as the reason it fired
+        assert any("UNCLEAR" in e and "attribution_uncertain" in e for e in errs), errs
 
     def test_gate_without_turns_raises_rather_than_silently_passing(self):
         f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
-        with pytest.raises(ValueError, match="turns"):
+        with pytest.raises(ValueError, match="turn-level validation"):
             validate_flags([f], self.GATED, 100.0, turns=None)
 
     def test_unlabeled_turns_raise(self):
@@ -394,6 +439,28 @@ class TestAttributionGate:
         f = self._no_role(quote="words in no turn")
         errs = validate_flags([f], self.GATED_NO_ROLE, 100.0, turns=self.LOW_TURNS)
         assert any("could not be located" in e for e in errs)
+
+    @pytest.mark.parametrize("truthy", ["true", "TRUE", 1, "yes", [0]])
+    def test_truthy_non_true_does_not_satisfy_the_gate(self, truthy):
+        # Flags are LLM-authored JSON. A model emitting "true" or 1 instead of a
+        # JSON boolean is a realistic failure mode, and a truthiness test would
+        # let it silently clear the gate on a 0.6667-concordance turn — corrupt
+        # attribution entering the research record marked as validated.
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0,
+                       attribution_uncertain=truthy)
+        errs = validate_flags([f], self.GATED, 100.0, turns=self.LOW_TURNS)
+        assert any("attribution_uncertain" in e for e in errs), (truthy, errs)
+
+    def test_gate_applies_to_every_flag_not_just_the_first(self):
+        # Nothing else in the suite runs the gate over more than one flag, so a
+        # refactor that hoisted it out of the per-flag loop, or broke after the
+        # first finding, would ship undetected.
+        clean = moral_flag(id="g0001")                      # cites m0002 @ 1.0
+        dirty = moral_flag(id="g0002", quote="Or that 50 people over there?",
+                           t_start=0.0, t_end=4.0)          # cites m0001 @ 0.6667
+        errs = validate_flags([clean, dirty], self.GATED, 100.0, turns=self.LOW_TURNS)
+        assert any("g0002" in e and "attribution_uncertain" in e for e in errs), errs
+        assert not any(e.startswith("g0001") for e in errs), errs
 
     def test_concordance_boundary_exactly_one_does_not_trip_the_gate(self):
         # pins the `< 1.0` boundary explicitly rather than incidentally
