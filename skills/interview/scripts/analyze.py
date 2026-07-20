@@ -430,6 +430,30 @@ def _containing_episode(t: float, episodes: list[dict]) -> dict | None:
     return None
 
 
+def _crossed_episodes(start: float, end: float, episodes: list[dict]) -> list[dict]:
+    """Episodes that BEGIN strictly inside the span (start, end).
+
+    This is the straddle test, and it deliberately is NOT "does the span's end
+    resolve to a different episode". A span ending in a GAP resolves to no
+    episode at all, so `e01(0-100), e02(100-120), gap, e03(130-200)` with a turn
+    at 50-125 reported nothing while completely swallowing e02 — a whole
+    separate confrontation with a different target, silently filed under e01.
+    Asking which episodes the span *begins inside itself* catches that case and
+    the ordinary two-episode straddle with one predicate.
+
+    A span that merely overruns the FINAL episode's end (195-205 against a last
+    episode ending at 200) begins no episode, so it stays silent: there is no
+    competing episode there and its episode_id is unambiguous. That trailing
+    overrun is the common, harmless case and must not become a finding.
+
+    The span's own home episode can never appear here — containment gives
+    `home.t_start <= start`, which cannot also be strictly greater than start —
+    so no "is not home" filter is needed (it would be an unreachable branch).
+    """
+    return [e for e in episodes
+            if _is_num(e.get("t_start")) and start < float(e["t_start"]) < end]
+
+
 def validate_episodes(
     episodes: list[dict], turns: list[dict], codebook: dict | None = None
 ) -> list[str]:
@@ -437,12 +461,12 @@ def validate_episodes(
 
     Episodes are ordered, non-overlapping time spans. Gaps BETWEEN episodes are
     legal (silent B-roll holds no turns); coverage is enforced over turns —
-    every turn's start must fall inside exactly one episode, and a turn whose
-    END lands in a different episode is reported as straddling: that is a
-    mis-drawn boundary, and authoring time is the only point at which the
-    researcher can still fix it. Arc objects are optional; when present their
-    enums are checked (turning_point may be a turn id or the literal
-    "off-camera" — arcs can turn before the camera ran).
+    every turn's start must fall inside exactly one episode, and a turn that
+    spans the START of any other episode is reported as straddling (see
+    _crossed_episodes): that is a mis-drawn boundary, and authoring time is the
+    only point at which the researcher can still fix it. Arc objects are
+    optional; when present their enums are checked (turning_point may be a turn
+    id or the literal "off-camera" — arcs can turn before the camera ran).
 
     Required fields and the episode/arc enums are read from the codebook
     (`episode_schema`, `arc_schema`); the module constants are only the
@@ -524,9 +548,10 @@ def validate_episodes(
             orphans.append(f"{tid} (start {start})")
             continue
         if _is_num(end):
-            tail = _containing_episode(float(end), episodes)
-            if tail is not None and tail is not home:
-                straddlers.append(f"{tid} ({home.get('id')} → {tail.get('id')})")
+            crossed = _crossed_episodes(float(start), float(end), episodes)
+            if crossed:
+                names = ", ".join(str(e.get("id")) for e in crossed)
+                straddlers.append(f"{tid} ({home.get('id')} → {names})")
     errors.extend(_capped(orphans, "turn(s) fall in no episode"))
     errors.extend(_capped(straddlers, "turn(s) straddle an episode boundary"))
     return errors
@@ -553,9 +578,10 @@ def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
     errors and a caller that persists on the error path must not write a record
     where a missing key is indistinguishable from an unassigned one.
 
-    A flag whose t_end lands in a different episode is reported as straddling
-    and filed under its t_start's episode — a boundary drawn through a flag is
-    a research-record problem, not something to resolve silently.
+    A flag that spans the START of any other episode is reported as straddling
+    (same predicate as validate_episodes — see _crossed_episodes) and filed
+    under its t_start's episode: a boundary drawn through a flag is a
+    research-record problem, not something to resolve silently.
     """
     errors: list[str] = []
     for f in flags:
@@ -572,8 +598,9 @@ def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
             continue
         f["episode_id"] = home["id"]
         if _is_num(t_end):
-            tail = _containing_episode(float(t_end), episodes)
-            if tail is not None and tail is not home:
-                errors.append(f"{ref}: straddles episodes {home['id']} → {tail['id']} "
+            crossed = _crossed_episodes(float(t_start), float(t_end), episodes)
+            if crossed:
+                names = ", ".join(str(e.get("id")) for e in crossed)
+                errors.append(f"{ref}: straddles episodes {home['id']} → {names} "
                               f"(t_start {t_start}, t_end {t_end}); filed under {home['id']}")
     return errors

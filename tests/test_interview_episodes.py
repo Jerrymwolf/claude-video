@@ -156,6 +156,35 @@ class TestValidateEpisodes:
         errs = validate_episodes(EPISODES, [turn("t0001", 95.0, 140.0)])
         assert any("t0001" in e and "straddle" in e for e in errs)
 
+    def test_turn_that_swallows_a_whole_episode_is_reported(self):
+        # 50 → 125 covers ALL of e02 and lands in the 120-130 GAP, so the old
+        # "does the end resolve to a different episode" test saw None and stayed
+        # silent — filing a separate confrontation with a different target under
+        # e01 with nothing reported. The predicate must ask which episodes the
+        # span BEGINS, not where its end lands.
+        errs = validate_episodes(EPISODES, [turn("t0001", 50.0, 125.0)])
+        assert any("t0001" in e and "straddle" in e for e in errs), errs
+        assert any("e02" in e for e in errs), errs
+
+    def test_turn_ending_exactly_on_the_next_episode_start_is_not_reported(self):
+        # Half-open containment puts the boundary instant in the LATER episode,
+        # so a turn ending exactly at 100 holds none of e02's content. Episodes
+        # are normally authored by snapping to turn boundaries, so an inclusive
+        # upper bound would report every correctly-drawn boundary as a straddle.
+        assert validate_episodes(EPISODES, [turn("t0001", 95.0, 100.0)]) == []
+
+    def test_turn_starting_exactly_on_its_own_episode_start_is_not_reported(self):
+        # The other bound: a turn opening an episode must not be read as
+        # straddling INTO that episode. `start <= t_start` would report every
+        # first turn of every episode.
+        assert validate_episodes(EPISODES, [turn("t0001", 100.0, 110.0)]) == []
+
+    def test_turn_overrunning_the_final_episode_end_is_not_reported(self):
+        # the genuinely common trailing overrun: a turn running a few seconds
+        # past the LAST episode's end begins no competing episode, so its
+        # episode_id is unambiguous and it must stay silent
+        assert validate_episodes(EPISODES, [turn("t0001", 195.0, 205.0)]) == []
+
 
 class TestCodebookDrivenRequiredFields:
     """`episode_schema.required` must actually drive the required-field check.
@@ -214,7 +243,28 @@ class TestMergeBarrier:
 
     def test_barrier_is_inert_without_episode_id(self):
         # every pre-episode caller (cmd_validate_flags, cmd_render) passes
-        # units with no episode_id — behavior must be byte-identical
+        # units with no episode_id — behavior must be byte-identical.
+        # NON-merging units (different labels) on purpose: the merge branch's
+        # `m.pop("episode_id", None)` would mask an unconditional
+        # `new["episode_id"] = ep`, which emits "episode_id": null into every
+        # unmerged display turn that cmd_render and cmd_validate_flags write.
+        units = [self.unit("u1", 0.0, 5.0, "First"),
+                 self.unit("u2", 5.0, 9.0, "Second", label="INTERVIEWER")]
+        merged = merge_labeled_turns(units)
+        assert len(merged) == 2
+        assert [m["text"] for m in merged] == ["First", "Second"]
+        assert all("episode_id" not in m for m in merged), merged
+
+    def test_barrier_is_inert_for_a_single_unannotated_unit(self):
+        # the smallest possible unit of the same property, with no merge branch
+        # anywhere near it
+        merged = merge_labeled_turns([self.unit("u1", 0.0, 5.0, "Only")])
+        assert len(merged) == 1
+        assert "episode_id" not in merged[0]
+
+    def test_unannotated_same_label_units_still_merge(self):
+        # the coverage the non-merging rewrite above gave up: pre-episode
+        # callers must still get one display turn out of two units
         units = [self.unit("u1", 0.0, 5.0, "First"), self.unit("u2", 5.0, 9.0, "Second")]
         merged = merge_labeled_turns(units)
         assert len(merged) == 1
@@ -274,6 +324,30 @@ class TestAssignment:
         errs = assign_flag_episodes(flags, EPISODES)
         assert flags[0]["episode_id"] == "e01"
         assert any("g0003" in e and "straddles" in e for e in errs)
+
+    def test_flag_that_swallows_a_whole_episode_is_reported(self):
+        # flags straddle for the same root cause as turns: t_end at 125 lands in
+        # the gap and resolves to no episode, so the old predicate filed a span
+        # covering all of e02 under e01 in silence
+        flags = [{"id": "g0005", "t_start": 50.0, "t_end": 125.0}]
+        errs = assign_flag_episodes(flags, EPISODES)
+        assert flags[0]["episode_id"] == "e01"
+        assert any("g0005" in e and "straddles" in e and "e02" in e for e in errs), errs
+
+    def test_flag_on_the_episode_boundaries_is_not_reported(self):
+        # same two bounds as the turn case: a flag ending exactly where the next
+        # episode begins, and one opening its own episode, are both clean
+        ending = [{"id": "g0007", "t_start": 95.0, "t_end": 100.0}]
+        assert assign_flag_episodes(ending, EPISODES) == []
+        assert ending[0]["episode_id"] == "e01"
+        opening = [{"id": "g0008", "t_start": 100.0, "t_end": 110.0}]
+        assert assign_flag_episodes(opening, EPISODES) == []
+        assert opening[0]["episode_id"] == "e02"
+
+    def test_flag_overrunning_the_final_episode_end_is_not_reported(self):
+        flags = [{"id": "g0006", "t_start": 195.0, "t_end": 205.0}]
+        assert assign_flag_episodes(flags, EPISODES) == []
+        assert flags[0]["episode_id"] == "e03"
 
     def test_non_numeric_flag_timestamp_errors_instead_of_raising(self):
         # the docstring promises errors, not exceptions

@@ -14,11 +14,14 @@ from pathlib import Path
 import framegrab
 import stt
 from analyze import (
+    assign_episode_ids,
+    assign_flag_episodes,
     build_turns,
     burst_timestamps,
     compute_concordance,
     merge_labeled_turns,
     segment_turns,
+    validate_episodes,
     validate_flags,
 )
 from dual_transcribe import apply_adjudications, diff_transcripts, transcribe_both
@@ -269,31 +272,83 @@ def cmd_concordance(args) -> int:
     return 0
 
 
+def cmd_validate_episodes(args) -> int:
+    """Validate LLM-authored episodes.json, then stamp episode_id onto every
+    diarized unit. Runs between concordance and validate-flags: flags inherit
+    their episode from the turn layer this stage annotates."""
+    work = Path(args.work)
+    episodes = _load(work / "episodes.json")
+    turns = _load(work / "diarized.json")
+    codebook_path = Path(args.codebook) if getattr(args, "codebook", None) else CODEBOOK_PATH
+    errors = validate_episodes(episodes, turns, codebook=_load(codebook_path))
+    if errors:
+        print("INVALID EPISODES:")
+        for e in errors:
+            print(f"  {e}")
+        return 1
+    assign_episode_ids(turns, episodes)
+    _save(work / "diarized.json", turns)
+    from collections import Counter
+    per_ep = Counter(t["episode_id"] for t in turns)
+    print(f"EPISODES: {len(episodes)}")
+    for e in episodes:
+        etype = e.get("type")
+        desc = f' target="{e.get("target_descriptor", "")}"' if etype == "confrontation" else ""
+        print(f"  {e['id']} {etype} [{format_hms(e['t_start'])}-{format_hms(e['t_end'])}] "
+              f"turns={per_ep.get(e['id'], 0)}{desc}")
+    return 0
+
+
 def cmd_validate_flags(args) -> int:
     work = Path(args.work)
     flags = _load(work / "flags.json")
-    codebook = _load(CODEBOOK_PATH)
+    codebook_path = Path(args.codebook) if getattr(args, "codebook", None) else CODEBOOK_PATH
+    codebook = _load(codebook_path)
     duration = float(args.duration) if args.duration else float("inf")
     if not args.duration and (work / "final_transcript.json").exists():
         segments = _load(work / "final_transcript.json")
         if segments:  # auto-derive: last segment end ≈ media duration
             duration = float(segments[-1]["end"])
     transcript_text = None
+    merged = None
     if (work / "diarized.json").exists():
         turns = _load(work / "diarized.json")
         if turns and all("label" in t for t in turns):
             # Validate against the same merged view the docx anchors against,
             # so a verbatim quote spanning two same-speaker sentences passes.
-            transcript_text = "\n".join(t["text"] for t in merge_labeled_turns(turns))
+            merged = merge_labeled_turns(turns)
+            transcript_text = "\n".join(t["text"] for t in merged)
         else:
             transcript_text = "\n".join(t["text"] for t in turns)
-    errors = validate_flags(flags, codebook, duration, transcript_text=transcript_text)
+    # `turns=merged` is load-bearing, not a convenience: a codebook declaring
+    # coding_scope or enforce_attribution_gate RAISES without turns rather than
+    # silently skipping its attribution guarantees.
+    errors = validate_flags(flags, codebook, duration,
+                            transcript_text=transcript_text, turns=merged)
+    ep_path = work / "episodes.json"
+    if not errors and ep_path.exists():
+        # merge_labeled_turns drops episode_id when its members disagree. After
+        # validate-episodes every unit carries one (assign_episode_ids raises on
+        # orphans), so a display turn without one means the episode stage never
+        # ran, or ran against units that have since changed — report it instead
+        # of quietly coding flags against a half-annotated turn layer.
+        stale = [t.get("id", "?") for t in (merged or []) if "episode_id" not in t]
+        if stale:
+            more = f" (+{len(stale) - 5} more)" if len(stale) > 5 else ""
+            errors = [f"{len(stale)} display turn(s) carry no episode_id — their "
+                      f"units disagreed or were never annotated; re-run "
+                      f"validate-episodes: {', '.join(stale[:5])}{more}"]
+        else:
+            errors = assign_flag_episodes(flags, _load(ep_path))
+            if not errors:
+                _save(work / "flags.json", flags)
     if errors:
         print("INVALID FLAGS:")
         for e in errors:
             print(f"  {e}")
         return 1
-    print(f"OK: {len(flags)} flags valid against codebook {codebook['codebook_version']}")
+    print(f"OK: {len(flags)} flags valid against codebook {codebook['codebook_version']} "
+          f"({codebook_path.name})")
     return 0
 
 
@@ -435,7 +490,8 @@ def main() -> int:
     p = sub.add_parser("transcribe"); p.add_argument("media"); p.add_argument("--out-dir")
     p = sub.add_parser("finalize"); p.add_argument("--work", required=True); p.add_argument("--unit", choices=["segment", "gap"], default="segment")
     p = sub.add_parser("concordance"); p.add_argument("--work", required=True)
-    p = sub.add_parser("validate-flags"); p.add_argument("--work", required=True); p.add_argument("--duration")
+    p = sub.add_parser("validate-episodes"); p.add_argument("--work", required=True); p.add_argument("--codebook", metavar="PATH", help="codebook whose episode_schema/arc_schema govern validation (default: shipped codebook.json)")
+    p = sub.add_parser("validate-flags"); p.add_argument("--work", required=True); p.add_argument("--duration"); p.add_argument("--codebook", metavar="PATH", help="alternate codebook file (default: shipped codebook.json)")
     p = sub.add_parser("frames"); p.add_argument("media"); p.add_argument("--out-dir")
     p = sub.add_parser("render"); p.add_argument("media"); p.add_argument("--out-dir")
     # Optional speaker display names (default: the canonical role labels).
@@ -449,7 +505,9 @@ def main() -> int:
     handlers = {
         "preflight": cmd_preflight, "setup": cmd_setup, "discover": cmd_discover,
         "transcribe": cmd_transcribe, "finalize": cmd_finalize,
-        "concordance": cmd_concordance, "validate-flags": cmd_validate_flags,
+        "concordance": cmd_concordance,
+        "validate-episodes": cmd_validate_episodes,
+        "validate-flags": cmd_validate_flags,
         "frames": cmd_frames, "render": cmd_render,
         "corpus-summary": cmd_corpus_summary,
     }
