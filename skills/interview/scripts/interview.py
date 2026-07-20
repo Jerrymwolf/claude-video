@@ -23,6 +23,7 @@ from analyze import (
     episode_drift,
     merge_labeled_turns,
     segment_turns,
+    summarize_corpus,
     validate_episodes,
     validate_flags,
 )
@@ -554,25 +555,30 @@ def cmd_render(args) -> int:
 
 
 def cmd_corpus_summary(args) -> int:
+    """Aggregate every sidecar under `folder` into corpus_summary.json.
+
+    Deliberately takes NO --codebook: aggregation is codebook-agnostic — it
+    counts whatever the sidecars themselves record. An accepted-and-ignored
+    argument would read as a filter and mislead.
+    """
     folder = Path(args.folder)
-    sidecars = sorted(folder.glob("*_interview/sidecar.json"))
-    by_marker, by_emotion = Counter(), Counter()
-    rows = []
-    for path in sidecars:
+    sidecar_paths = sorted(folder.glob("*_interview/sidecar.json"))
+    sidecars = []
+    for path in sidecar_paths:
         sc = _load(path)
         if not isinstance(sc, dict) or "interview" not in sc or "accuracy_claim" not in sc:
             print(f"WARNING: skipping non-interview sidecar: {path}", file=sys.stderr)
             continue
-        flags = sc.get("flags", [])
-        for f in flags:
-            for m in f.get("marker_types", []):
-                by_marker[m] += 1
-            if f.get("emotion"):
-                by_emotion[f["emotion"]] += 1
-        rows.append({"media": sc["interview"]["media"], "flags": len(flags),
-                     "claim": sc["accuracy_claim"]})
-    summary = {"interviews": len(rows), "per_interview": rows,
-               "flags_by_marker": dict(by_marker), "flags_by_emotion": dict(by_emotion)}
+        sidecars.append(sc)
+    summary = summarize_corpus(sidecars)
+    # Back-compat alias: pre-episode consumers read flags_by_emotion.
+    summary["flags_by_emotion"] = summary["flags_by_affect"]
+    if summary["mixed_constructs"]:
+        print("WARNING: this corpus spans more than one codebook "
+              f"({', '.join(sorted(summary['codebooks']))}). Marker vocabularies "
+              "differ between codebooks, so flags_by_marker and marker_by_outcome "
+              "sum incompatible constructs — read per_interview[].codebook instead.",
+              file=sys.stderr)
     _save(folder / "corpus_summary.json", summary)
     print(json.dumps(summary, indent=2))
     return 0

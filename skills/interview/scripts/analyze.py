@@ -651,3 +651,73 @@ def episode_drift(turns: list[dict], episodes: list[dict]) -> list[str]:
                        f"now falls in {want!r})")
     return _capped(out, "display turn(s) out of sync with episodes.json — "
                         "re-run validate-episodes")
+
+
+def sidecar_codebook(sidecar: dict) -> str:
+    """Which codebook a sidecar was coded against.
+
+    Schema 1.1+ always records `codebook_file`. Pre-1.1 sidecars predate the
+    field, and absence there legitimately means the shipped codebook — that
+    inference is only valid below 1.1, which is why schema_version gates it
+    rather than absence alone.
+    """
+    name = sidecar.get("codebook_file")
+    if name:
+        return str(name)
+    return "codebook.json" if sidecar.get("schema_version", "1.0") == "1.0" else "unknown"
+
+
+def summarize_corpus(sidecars: list[dict]) -> dict:
+    """Aggregate per-interview sidecars into corpus counts.
+
+    Works on both sidecar generations: pre-episode sidecars contribute marker
+    and affect counts only (`emotion` is read as the affect fallback); episode
+    sidecars additionally feed outcome counts and the marker x outcome
+    cross-tab (keys "marker|outcome"), which counts only flags inside episodes
+    carrying an arc outcome.
+
+    Marker vocabularies are codebook-specific, so a corpus spanning more than
+    one codebook sets `mixed_constructs` — the flat counts are then a sum over
+    incompatible vocabularies and must not be read as one distribution.
+    """
+    by_marker: Counter = Counter()
+    by_affect: Counter = Counter()
+    outcomes: Counter = Counter()
+    cross: Counter = Counter()
+    personas: list[str] = []
+    codebooks: Counter = Counter()
+    rows: list[dict] = []
+    for sc in sidecars:
+        flags = sc.get("flags", [])
+        episodes = sc.get("episodes", [])
+        codebook = sidecar_codebook(sc)
+        codebooks[codebook] += 1
+        ep_outcome = {e["id"]: (e.get("arc") or {}).get("outcome")
+                      for e in episodes if isinstance(e, dict) and e.get("id")}
+        for f in flags:
+            for m in f.get("marker_types", []):
+                by_marker[m] += 1
+            affect = f.get("affect") or f.get("emotion")
+            if affect:
+                by_affect[affect] += 1
+            outcome = ep_outcome.get(f.get("episode_id"))
+            if outcome:
+                for m in f.get("marker_types", []):
+                    cross[f"{m}|{outcome}"] += 1
+        for e in episodes:
+            if isinstance(e, dict) and e.get("type") == "confrontation":
+                oc = (e.get("arc") or {}).get("outcome")
+                if oc:
+                    outcomes[oc] += 1
+        persona = sc.get("interview", {}).get("persona")
+        if persona:
+            personas.append(persona)
+        rows.append({"media": sc["interview"]["media"], "flags": len(flags),
+                     "episodes": len(episodes), "codebook": codebook,
+                     "claim": sc["accuracy_claim"]})
+    return {"interviews": len(rows), "per_interview": rows,
+            "codebooks": dict(codebooks),
+            "mixed_constructs": len(codebooks) > 1,
+            "flags_by_marker": dict(by_marker), "flags_by_affect": dict(by_affect),
+            "episode_outcomes": dict(outcomes), "marker_by_outcome": dict(cross),
+            "personas": personas}
