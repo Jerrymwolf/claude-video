@@ -180,6 +180,34 @@ class TestCodebookDrivenValidation:
         errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
         assert any("no INTERVIEWEE turn near" in e for e in errs)
 
+    def test_flag_entirely_before_the_turn_is_rejected_outside_the_slop(self):
+        # Sibling of the "flag after turn" case above: the other edge of the
+        # +/-2s window. m0002 holds the quote at [5, 9]; a flag ending at 2.0 is
+        # 3s early, past the slop.
+        f = moral_flag(t_start=0.0, t_end=2.0)
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("no INTERVIEWEE turn near" in e for e in errs), errs
+
+    def test_flag_just_before_the_turn_but_inside_the_slop_still_resolves(self):
+        # Pins the `- 2.0` itself, not merely the existence of a lower bound:
+        # ending 1s before the turn starts is inside the slop and must resolve.
+        f = moral_flag(t_start=1.0, t_end=4.0)
+        assert validate_flags([f], MINI_MORAL, 100.0, turns=TURNS) == []
+
+    def test_lone_candidate_inside_the_slop_but_not_overlapping_is_selected(self):
+        # The only candidate turn ends before the flag begins, so its overlap is
+        # NEGATIVE (-1.0) while still inside the slop. It must still be selected:
+        # an overlap floor of 0.0 would drop it, report the quote as unlocatable,
+        # and un-gate a low-concordance citation.
+        turns = [{"id": "m0001", "start": 0.0, "end": 4.0,
+                  "text": "Don't touch my property.", "label": "INTERVIEWEE",
+                  "concordance": 0.5, "segment_indices": [0]}]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag(t_start=5.0, t_end=6.0)], cb, 100.0,
+                              turns=turns)
+        assert any("m0001" in e and "attribution_uncertain" in e for e in errs), errs
+        assert not any("could not be located" in e for e in errs), errs
+
     def test_untimed_flag_falls_back_to_text_only_turn_match(self):
         # No timestamps to anchor with: the text-only fallback must still resolve
         # the turn rather than treating every turn as out-of-window.
@@ -295,3 +323,81 @@ class TestCodebookDrivenValidation:
     def test_non_string_quote_is_reported_not_crashed(self):
         errs = validate_flags([moral_flag(quote=123)], MINI_MORAL, 100.0, turns=TURNS)
         assert any("quote must be a string" in e for e in errs), errs
+
+
+class TestAttributionGate:
+    LOW_TURNS = [
+        {"id": "m0001", "start": 0.0, "end": 4.0, "text": "Or that 50 people over there?",
+         "label": "INTERVIEWEE", "concordance": 0.6667, "segment_indices": [0]},
+        {"id": "m0002", "start": 5.0, "end": 9.0, "text": "Don't touch my property.",
+         "label": "INTERVIEWEE", "concordance": 1.0, "segment_indices": [1]},
+    ]
+    GATED = dict(MINI_MORAL, enforce_attribution_gate=True)
+
+    # A gate-only codebook: no coding_scope, no speaker_role in required, so the
+    # gate is exercised without the speaker_role check firing for its own reasons.
+    GATED_NO_ROLE = {
+        "codebook_version": "1.0.0",
+        "affect_field": "affect",
+        "affect_vocabulary": ["anger", "shame", "neutral"],
+        "enforce_attribution_gate": True,
+        "markers": MINI_MORAL["markers"],
+        "flag_schema": {"required": ["id", "marker_types", "quote", "t_start",
+                                     "t_end", "salience"],
+                        "optional": ["affect", "attribution_uncertain"]},
+    }
+
+    @staticmethod
+    def _no_role(**over):
+        f = moral_flag(**over)
+        f.pop("speaker_role", None)
+        return f
+
+    def test_low_concordance_quote_requires_uncertainty_flag(self):
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
+        errs = validate_flags([f], self.GATED, 100.0, turns=self.LOW_TURNS)
+        assert any("attribution_uncertain" in e for e in errs)
+
+    def test_uncertainty_flag_satisfies_gate(self):
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0,
+                       attribution_uncertain=True)
+        assert validate_flags([f], self.GATED, 100.0, turns=self.LOW_TURNS) == []
+
+    def test_full_concordance_quote_needs_no_flag(self):
+        assert validate_flags([moral_flag()], self.GATED, 100.0, turns=self.LOW_TURNS) == []
+
+    def test_gate_off_means_no_requirement(self):
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
+        assert validate_flags([f], MINI_MORAL, 100.0, turns=self.LOW_TURNS) == []
+
+    def test_unclear_label_triggers_gate_even_at_full_concordance(self):
+        turns = [{"id": "m0001", "start": 5.0, "end": 9.0,
+                  "text": "Don't touch my property.", "label": "UNCLEAR",
+                  "concordance": 1.0, "segment_indices": [0]}]
+        errs = validate_flags([self._no_role()], self.GATED_NO_ROLE, 100.0, turns=turns)
+        assert any("attribution_uncertain" in e for e in errs)
+        # the message must name the real trigger, not report "concordance 1.0"
+        assert any("UNCLEAR" in e for e in errs)
+
+    def test_gate_without_turns_raises_rather_than_silently_passing(self):
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
+        with pytest.raises(ValueError, match="turns"):
+            validate_flags([f], self.GATED, 100.0, turns=None)
+
+    def test_unlabeled_turns_raise(self):
+        bare = [{"id": "m0001", "start": 0.0, "end": 4.0,
+                 "text": "Or that 50 people over there?"}]
+        with pytest.raises(ValueError, match="label/concordance"):
+            validate_flags([moral_flag()], self.GATED, 100.0, turns=bare)
+
+    def test_unlocatable_quote_is_a_finding_not_a_pass(self):
+        f = self._no_role(quote="words in no turn")
+        errs = validate_flags([f], self.GATED_NO_ROLE, 100.0, turns=self.LOW_TURNS)
+        assert any("could not be located" in e for e in errs)
+
+    def test_concordance_boundary_exactly_one_does_not_trip_the_gate(self):
+        # pins the `< 1.0` boundary explicitly rather than incidentally
+        turns = [{"id": "m0001", "start": 5.0, "end": 9.0,
+                  "text": "Don't touch my property.", "label": "INTERVIEWEE",
+                  "concordance": 1.0, "segment_indices": [0]}]
+        assert validate_flags([self._no_role()], self.GATED_NO_ROLE, 100.0, turns=turns) == []

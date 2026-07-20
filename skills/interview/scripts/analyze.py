@@ -149,7 +149,10 @@ def _find_quote_turn(flag: dict, turns: list[dict], label: str | None = None) ->
     t0, t1 = flag.get("t_start"), flag.get("t_end")
     timed = isinstance(t0, (int, float)) and isinstance(t1, (int, float))
     best: dict | None = None
-    best_overlap = 0.0
+    # -inf, not 0.0: a candidate inside the +/-2s slop but not truly overlapping
+    # has NEGATIVE overlap and must still be selectable — that gap is exactly
+    # what the slop exists to tolerate. A 0.0 floor would reject it.
+    best_overlap = float("-inf")
     for turn in turns:
         if label is not None and turn.get("label") != label:
             continue
@@ -160,7 +163,7 @@ def _find_quote_turn(flag: dict, turns: list[dict], label: str | None = None) ->
         if t0 > turn["end"] + 2.0 or t1 < turn["start"] - 2.0:
             continue
         overlap = min(t1, turn["end"]) - max(t0, turn["start"])
-        if best is None or overlap > best_overlap:
+        if overlap > best_overlap:
             best, best_overlap = turn, overlap
     return best
 
@@ -177,13 +180,29 @@ def validate_flags(
     When `transcript_text` is provided, every quote must be a verbatim
     substring of it — paraphrased quotes are research-record corruption.
 
-    Codebook-declared behavior (defaults preserve the shipped narrative-gravity
-    codebook exactly): `affect_field` names the affect key ("emotion" default);
-    `affect_vocabulary` (fallback: `emotions`) is its vocabulary; markers with
-    `requires_affect`/`requires_emotion` demand it; `coding_scope` (default
-    ["INTERVIEWEE"]) gates `speaker_role` when the schema requires that field;
-    `enforce_attribution_gate` demands `attribution_uncertain: true` on flags
-    whose quoted turn has concordance < 1.0 or label UNCLEAR.
+    Codebook-declared behavior (every default preserves the shipped
+    narrative-gravity codebook exactly):
+
+    - `affect_field` — name of the affect key on each flag. Default "emotion".
+    - `affect_vocabulary` — the closed vocabulary for that key. When
+      `affect_field` is declared, this is the ONLY source: an `emotions` key
+      left behind by copy-editing a narrative codebook is ignored, because a
+      stale vocabulary silently admitting the wrong terms is worse than an
+      empty one rejecting them. `emotions` is consulted as a fallback only
+      when `affect_field` is absent (i.e. the legacy narrative codebook).
+      Default: empty.
+    - `markers[].requires_affect` / `requires_emotion` — markers demanding a
+      value in `affect_field`. Default: not required.
+    - `coding_scope` — the labels a flag's `speaker_role` may carry; the quote
+      must then be found in a turn bearing that same role. Default
+      ["INTERVIEWEE"]. Merely declaring this key turns the check on; so does
+      listing `speaker_role` in `flag_schema.required`. Either alone is
+      sufficient — the check does not wait for the schema to require the
+      field. It runs only on flags that actually carry a `speaker_role`;
+      a missing one is reported by the required-field check instead.
+    - `enforce_attribution_gate` — demands `attribution_uncertain: true` on
+      flags whose quoted turn has concordance < 1.0 or label UNCLEAR, and
+      reports a flag whose quote resolves to no turn at all. Default False.
 
     A codebook declaring `coding_scope` or `enforce_attribution_gate` raises
     without labeled `turns`: those declarations are the author's attribution
