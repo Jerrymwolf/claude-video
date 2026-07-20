@@ -133,22 +133,36 @@ def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
 
 
 def _find_quote_turn(flag: dict, turns: list[dict], label: str | None = None) -> dict | None:
-    """First turn containing the flag's quote, optionally restricted to a label,
-    whose span overlaps the flag's [t_start-2, t_end+2] window (mirrors the
-    docx anchor slop). Falls back to text-only match when timestamps are absent."""
-    quote = flag.get("quote") or ""
-    if not quote:
+    """The turn containing the flag's quote that best matches its timespan.
+
+    Candidates are turns whose text contains the quote (optionally restricted to
+    a label) and whose span falls inside the flag's [t_start-2, t_end+2] window
+    (mirrors the docx anchor slop). The winner is the candidate with the MOST
+    temporal overlap, first match breaking ties: short quotes ("Yeah.", "No.")
+    recur constantly in confrontation transcripts, and resolving to a merely
+    nearby turn would read the wrong turn's concordance. Falls back to the first
+    text-only match when the flag carries no timestamps to anchor with.
+    """
+    quote = flag.get("quote")
+    if not isinstance(quote, str) or not quote:
         return None
     t0, t1 = flag.get("t_start"), flag.get("t_end")
     timed = isinstance(t0, (int, float)) and isinstance(t1, (int, float))
+    best: dict | None = None
+    best_overlap = 0.0
     for turn in turns:
         if label is not None and turn.get("label") != label:
             continue
         if quote not in turn["text"]:
             continue
-        if not timed or (t0 <= turn["end"] + 2.0 and t1 >= turn["start"] - 2.0):
+        if not timed:
             return turn
-    return None
+        if t0 > turn["end"] + 2.0 or t1 < turn["start"] - 2.0:
+            continue
+        overlap = min(t1, turn["end"]) - max(t0, turn["start"])
+        if best is None or overlap > best_overlap:
+            best, best_overlap = turn, overlap
+    return best
 
 
 def validate_flags(
@@ -169,18 +183,43 @@ def validate_flags(
     `requires_affect`/`requires_emotion` demand it; `coding_scope` (default
     ["INTERVIEWEE"]) gates `speaker_role` when the schema requires that field;
     `enforce_attribution_gate` demands `attribution_uncertain: true` on flags
-    whose quoted turn has concordance < 1.0 or label UNCLEAR (needs `turns`).
+    whose quoted turn has concordance < 1.0 or label UNCLEAR.
+
+    A codebook declaring `coding_scope` or `enforce_attribution_gate` raises
+    without labeled `turns`: those declarations are the author's attribution
+    guarantee, and silently skipping them because an optional argument was
+    omitted would pass corrupt flags as validated.
     """
     errors: list[str] = []
     marker_ids = {m["id"] for m in codebook["markers"]}
+    # An explicitly declared affect_field owns its vocabulary: a codebook
+    # copy-edited from the narrative one may still carry a stale `emotions`
+    # key, which must not silently become the vocabulary for `affect`.
     affect_field = codebook.get("affect_field", "emotion")
-    vocab = set(codebook.get("affect_vocabulary") or codebook.get("emotions") or [])
+    if "affect_field" in codebook:
+        vocab = set(codebook.get("affect_vocabulary") or [])
+    else:
+        vocab = set(codebook.get("affect_vocabulary") or codebook.get("emotions") or [])
     requiring = {m["id"] for m in codebook["markers"]
                  if m.get("requires_affect") or m.get("requires_emotion")}
     required = codebook["flag_schema"]["required"]
     scope = set(codebook.get("coding_scope", ["INTERVIEWEE"]))
-    check_role = "speaker_role" in required
+    check_role = "speaker_role" in required or "coding_scope" in codebook
     gate = bool(codebook.get("enforce_attribution_gate"))
+
+    if gate or check_role:
+        if turns is None:
+            raise ValueError(
+                "codebook declares coding_scope/enforce_attribution_gate but no "
+                "turns were supplied — turn-level validation cannot be skipped"
+            )
+        unlabeled = [t.get("id", "?") for t in turns
+                     if "label" not in t or "concordance" not in t]
+        if unlabeled:
+            raise ValueError(
+                "turns missing label/concordance (run concordance first): "
+                + ", ".join(unlabeled[:5])
+            )
 
     for i, flag in enumerate(flags):
         ref = flag.get("id", f"flags[{i}]")
@@ -188,6 +227,9 @@ def validate_flags(
             if flag.get(field) in (None, "", []):
                 errors.append(f"{ref}: missing required field '{field}'")
         quote = flag.get("quote")
+        if quote is not None and not isinstance(quote, str):
+            errors.append(f"{ref}: quote must be a string (got {type(quote).__name__})")
+            quote = None  # every downstream quote check needs a string
         if transcript_text is not None and quote and quote not in transcript_text:
             errors.append(f"{ref}: quote is not a verbatim substring of the transcript")
         markers = flag.get("marker_types")
@@ -199,27 +241,38 @@ def validate_flags(
         for m in markers:
             if m not in marker_ids:
                 errors.append(f"{ref}: unknown marker '{m}'")
-        if any(m in requiring for m in markers):
+        affect_markers = sorted(m for m in markers if m in requiring)
+        if affect_markers:
             value = flag.get(affect_field)
+            names = ", ".join(affect_markers)
             if not value:
-                errors.append(f"{ref}: marker requires an {affect_field}")
+                errors.append(f"{ref}: marker '{names}' requires an {affect_field}")
             elif value not in vocab:
                 errors.append(f"{ref}: {affect_field} '{value}' not in codebook vocabulary")
         role = flag.get("speaker_role")
+        cited: dict | None = None  # the turn the speaker_role check resolved, if any
         if check_role and role:
             if role not in scope:
                 errors.append(f"{ref}: speaker_role '{role}' not in coding scope {sorted(scope)}")
-            elif turns is not None and quote and _find_quote_turn(flag, turns, label=role) is None:
-                errors.append(f"{ref}: no {role} turn near [{flag.get('t_start')}, "
-                              f"{flag.get('t_end')}] contains the quote")
-        if gate and turns is not None and quote:
-            home = _find_quote_turn(flag, turns)
-            if home is not None and (home.get("label") == "UNCLEAR"
-                                     or float(home.get("concordance", 1.0)) < 1.0):
+            elif quote:
+                cited = _find_quote_turn(flag, turns, label=role)
+                if cited is None:
+                    errors.append(f"{ref}: no {role} turn near [{flag.get('t_start')}, "
+                                  f"{flag.get('t_end')}] contains the quote")
+        if gate and quote:
+            # Reuse the turn the speaker_role check already resolved — a second,
+            # unscoped lookup can legitimately land on a different turn and then
+            # gate a correctly-attributed flag against a neighbour's concordance.
+            home = cited if cited is not None else _find_quote_turn(flag, turns)
+            if home is None:
+                errors.append(f"{ref}: quote could not be located in any turn — "
+                              f"attribution cannot be verified")
+            elif home["label"] == "UNCLEAR" or float(home["concordance"]) < 1.0:
                 if flag.get("attribution_uncertain") is not True:
-                    errors.append(f"{ref}: quoted turn {home['id']} has concordance "
-                                  f"{home.get('concordance')} — flag must set "
-                                  f"attribution_uncertain: true")
+                    reason = ("is labeled UNCLEAR" if home["label"] == "UNCLEAR"
+                              else f"has concordance {home['concordance']}")
+                    errors.append(f"{ref}: quoted turn {home['id']} {reason} — flag "
+                                  f"must set attribution_uncertain: true")
         salience = flag.get("salience")
         if not isinstance(salience, int) or isinstance(salience, bool) or not 1 <= salience <= 5:
             errors.append(f"{ref}: salience must be an integer 1-5 (got {salience!r})")

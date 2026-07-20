@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from analyze import validate_flags
 
 MORAL_PATH = (Path(__file__).resolve().parent.parent / "skills" / "interview"
@@ -172,3 +174,124 @@ class TestCodebookDrivenValidation:
         f2 = dict(f, emotion=None)
         errs = validate_flags([f2], old, 100.0, turns=TURNS)
         assert any("requires an emotion" in e for e in errs)
+
+    def test_quote_outside_the_timestamp_window_is_rejected(self):
+        f = moral_flag(t_start=30.0, t_end=34.0)   # text matches m0002; timestamps 21s away
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("no INTERVIEWEE turn near" in e for e in errs)
+
+    def test_untimed_flag_falls_back_to_text_only_turn_match(self):
+        # No timestamps to anchor with: the text-only fallback must still resolve
+        # the turn rather than treating every turn as out-of-window.
+        f = moral_flag()
+        del f["t_start"], f["t_end"]
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert not any("turn near" in e for e in errs)
+        assert all("missing required field" in e for e in errs), errs
+
+    def test_turn_with_maximum_overlap_wins_not_the_first_text_match(self):
+        # Short quotes recur. m0001 is inside the +/-2s slop but barely; m0002 is
+        # the real home. Picking the first match would read m0001's concordance
+        # and let a low-concordance citation through ungated.
+        turns = [
+            {"id": "m0001", "start": 0.0, "end": 4.0, "text": "Yeah.",
+             "label": "INTERVIEWEE", "concordance": 1.0},
+            {"id": "m0002", "start": 5.0, "end": 9.0, "text": "Yeah.",
+             "label": "INTERVIEWEE", "concordance": 0.5},
+        ]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag(quote="Yeah.")], cb, 100.0, turns=turns)
+        assert any("m0002" in e and "attribution_uncertain" in e for e in errs), errs
+        assert not any("m0001" in e for e in errs), errs
+
+    def test_gate_reuses_the_turn_the_speaker_role_check_resolved(self):
+        # An UNCLEAR turn overlaps the flag more than the INTERVIEWEE turn the
+        # flag actually cites. A second, unscoped lookup would resolve UNCLEAR
+        # and demand attribution_uncertain on a correctly-attributed flag.
+        turns = [
+            {"id": "m0001", "start": 6.0, "end": 10.0, "text": "Yeah.",
+             "label": "UNCLEAR", "concordance": 1.0},
+            {"id": "m0002", "start": 6.0, "end": 9.0, "text": "Yeah.",
+             "label": "INTERVIEWEE", "concordance": 1.0},
+        ]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        f = moral_flag(quote="Yeah.", t_start=6.0, t_end=10.0)
+        assert validate_flags([f], cb, 100.0, turns=turns) == []
+
+    def test_gate_fires_on_unclear_label_at_full_concordance(self):
+        turns = [dict(TURNS[0]), dict(TURNS[1], label="UNCLEAR", concordance=1.0)]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag()], cb, 100.0, turns=turns)
+        assert any("UNCLEAR" in e and "attribution_uncertain" in e for e in errs), errs
+        cleared = validate_flags([moral_flag(attribution_uncertain=True)], cb, 100.0,
+                                 turns=turns)
+        assert not any("attribution_uncertain" in e for e in cleared), cleared
+
+    def test_gate_names_concordance_when_that_is_the_trigger(self):
+        turns = [dict(TURNS[0]), dict(TURNS[1], concordance=0.66)]
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag()], cb, 100.0, turns=turns)
+        assert any("concordance 0.66" in e for e in errs), errs
+        assert not any("UNCLEAR" in e for e in errs), errs
+
+    def test_gate_rejects_a_quote_that_matches_no_turn(self):
+        cb = dict(MINI_MORAL, enforce_attribution_gate=True)
+        errs = validate_flags([moral_flag(quote="Words spoken nowhere.")], cb, 100.0,
+                              turns=TURNS)
+        assert any("could not be located in any turn" in e for e in errs), errs
+
+    def test_turn_level_codebook_without_turns_raises(self):
+        with pytest.raises(ValueError, match="turn-level validation"):
+            validate_flags([moral_flag()], MINI_MORAL, 100.0)
+
+    def test_unlabeled_turns_raise(self):
+        bare = [{"id": "m0001", "start": 0.0, "end": 4.0, "text": "Why is this cart here?"}]
+        with pytest.raises(ValueError, match="missing label/concordance"):
+            validate_flags([moral_flag()], MINI_MORAL, 100.0, turns=bare)
+
+    def test_coding_scope_applies_without_speaker_role_in_required(self):
+        cb = dict(MINI_MORAL, coding_scope=["INTERVIEWEE"],
+                  flag_schema={"required": ["id", "marker_types", "quote", "t_start",
+                                            "t_end", "salience"]})
+        f = moral_flag(speaker_role="INTERVIEWER", quote="Why is this cart here?",
+                       t_start=0.0, t_end=4.0)
+        errs = validate_flags([f], cb, 100.0, turns=TURNS)
+        assert any("not in coding scope" in e for e in errs), errs
+
+    def test_coding_scope_defaults_to_interviewee_only(self):
+        cb = {k: v for k, v in MINI_MORAL.items() if k != "coding_scope"}
+        assert validate_flags([moral_flag()], cb, 100.0, turns=TURNS) == []
+        f = moral_flag(speaker_role="INTERVIEWER", quote="Why is this cart here?",
+                       t_start=0.0, t_end=4.0)
+        errs = validate_flags([f], cb, 100.0, turns=TURNS)
+        assert any("not in coding scope ['INTERVIEWEE']" in e for e in errs), errs
+
+    def test_affect_vocabulary_takes_precedence_over_emotions(self):
+        cb = {"codebook_version": "1.0.0",
+              "affect_vocabulary": ["calm"], "emotions": ["anger"],
+              "markers": [{"id": "m1", "requires_emotion": True}],
+              "flag_schema": {"required": ["id", "marker_types", "quote", "t_start",
+                                           "t_end", "salience"]}}
+        base = {"id": "g0001", "marker_types": ["m1"], "quote": "Don't touch my property.",
+                "t_start": 5.0, "t_end": 9.0, "salience": 3}
+        assert validate_flags([dict(base, emotion="calm")], cb, 100.0) == []
+        errs = validate_flags([dict(base, emotion="anger")], cb, 100.0)
+        assert any("'anger' not in codebook vocabulary" in e for e in errs), errs
+
+    def test_declared_affect_field_does_not_fall_back_to_stale_emotions(self):
+        # A moral codebook copy-edited from the narrative one keeps an `emotions`
+        # key by accident; it must not become the vocabulary for `affect`.
+        cb = {k: v for k, v in MINI_MORAL.items() if k != "affect_vocabulary"}
+        cb["emotions"] = ["anger"]
+        errs = validate_flags([moral_flag(affect="anger")], cb, 100.0, turns=TURNS)
+        assert any("'anger' not in codebook vocabulary" in e for e in errs), errs
+
+    def test_affect_error_names_the_offending_marker(self):
+        f = moral_flag(affect=None,
+                       marker_types=["audience_address", "attribution_of_blame"])
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("marker 'attribution_of_blame' requires an affect" in e for e in errs), errs
+
+    def test_non_string_quote_is_reported_not_crashed(self):
+        errs = validate_flags([moral_flag(quote=123)], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("quote must be a string" in e for e in errs), errs
