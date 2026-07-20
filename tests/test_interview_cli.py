@@ -1,11 +1,10 @@
 """CLI stage wiring: validate-episodes, and validate-flags' --codebook /
-turn-passing / flag-episode stamping."""
+turn-passing / flag-episode stamping / turn-flag drift detection."""
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -64,10 +63,15 @@ def make_work(tmp_path, *, turns=None, flags=None, episodes=None):
     return work
 
 
-def args_for(work, **over):
-    base = {"work": str(work), "duration": None, "codebook": None}
-    base.update(over)
-    return SimpleNamespace(**base)
+def args_for(work, *extra, cmd="validate-episodes"):
+    """Build args THROUGH the real parser, not a hand-rolled namespace — the
+    fixture is then the CLI contract, and a newly-required argument fails here
+    instead of passing against a stale parallel copy."""
+    return interview.build_parser().parse_args([cmd, "--work", str(work), *extra])
+
+
+def flag_args(work, *extra):
+    return args_for(work, "--duration", "200", *extra, cmd="validate-flags")
 
 
 def read(work, name):
@@ -97,19 +101,42 @@ class TestCmdValidateEpisodes:
 
     def test_codebook_flag_selects_episode_schema(self, tmp_path, capsys):
         cb = tmp_path / "narrow.json"
-        cb.write_text(json.dumps({"episode_schema": {"types": ["confrontation"]}}),
+        cb.write_text(json.dumps({"codebook_version": "9.9.9",
+                                  "episode_schema": {"types": ["confrontation"]}}),
                       encoding="utf-8")
         work = make_work(tmp_path, turns=TURNS, episodes=EPISODES)
         # the default (shipped codebook.json, no episode_schema) accepts to-camera
         assert interview.cmd_validate_episodes(args_for(work)) == 0
         capsys.readouterr()
-        assert interview.cmd_validate_episodes(args_for(work, codebook=str(cb))) == 1
+        assert interview.cmd_validate_episodes(args_for(work, "--codebook", str(cb))) == 1
         assert "unknown type 'to-camera'" in capsys.readouterr().out
 
     def test_moral_codebook_episode_schema_accepts_the_pilot_shape(self, tmp_path):
         work = make_work(tmp_path, turns=TURNS, episodes=EPISODES)
         assert interview.cmd_validate_episodes(
-            args_for(work, codebook=str(MORAL_CODEBOOK))) == 0
+            args_for(work, "--codebook", str(MORAL_CODEBOOK))) == 0
+
+    def test_empty_turn_layer_is_rejected(self, tmp_path, capsys):
+        # an episode layer covering nothing is not a valid episode layer: every
+        # episode would print turns=0 and the stage would report success
+        work = make_work(tmp_path, turns=[], episodes=EPISODES)
+        assert interview.cmd_validate_episodes(args_for(work)) == 1
+        assert "run concordance first" in capsys.readouterr().err
+
+    def test_codebook_cannot_narrow_away_structural_fields(self, tmp_path, capsys):
+        # `id`/`t_start`/`t_end` are data-model invariants: assign_episode_ids
+        # and the summary loop dereference them, so a codebook narrowing
+        # `required` must produce findings, never a KeyError traceback
+        cb = tmp_path / "narrow.json"
+        cb.write_text(json.dumps({"codebook_version": "9.9.9",
+                                  "episode_schema": {"required": ["type"]}}),
+                      encoding="utf-8")
+        episodes = [{"type": "to-camera"}]
+        work = make_work(tmp_path, turns=TURNS, episodes=episodes)
+        assert interview.cmd_validate_episodes(args_for(work, "--codebook", str(cb))) == 1
+        out = capsys.readouterr().out
+        for field in ("id", "t_start", "t_end"):
+            assert f"missing required field '{field}'" in out, out
 
     def test_main_dispatches_validate_episodes_with_codebook(self, tmp_path, monkeypatch):
         # pins both the dispatch-dict entry and the --codebook parser argument
@@ -121,13 +148,85 @@ class TestCmdValidateEpisodes:
         assert read(work, "diarized.json")[2]["episode_id"] == "e02"
 
 
+class TestHandAuthoredInputFailures:
+    """episodes.json and --codebook are written by a person between stages, so
+    a typo is the expected failure. Exit 2, never 1: a broken input must stay
+    distinguishable from a legitimate validation finding."""
+
+    @staticmethod
+    def _exits_2(fn, args):
+        with pytest.raises(SystemExit) as exc:
+            fn(args)
+        assert exc.value.code == 2
+        return exc
+
+    def test_missing_episodes_json(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS)
+        self._exits_2(interview.cmd_validate_episodes, args_for(work))
+        assert "episodes.json" in capsys.readouterr().err
+
+    def test_missing_diarized_json(self, tmp_path, capsys):
+        work = make_work(tmp_path, episodes=EPISODES)
+        self._exits_2(interview.cmd_validate_episodes, args_for(work))
+        assert "diarized.json" in capsys.readouterr().err
+
+    def test_malformed_episodes_json_names_the_file_and_the_spot(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS)
+        (work / "episodes.json").write_text('[{"id": "e01",}]', encoding="utf-8")
+        self._exits_2(interview.cmd_validate_episodes, args_for(work))
+        err = capsys.readouterr().err
+        # work/ holds four JSON files — the raw decoder error names none of them
+        assert "episodes.json" in err and "line 1 column" in err
+
+    def test_malformed_episodes_json_at_validate_flags_too(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
+        (work / "episodes.json").write_text("[oops]", encoding="utf-8")
+        self._exits_2(interview.cmd_validate_flags, flag_args(work))
+        assert "episodes.json" in capsys.readouterr().err
+
+    def test_codebook_path_typo(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
+        self._exits_2(interview.cmd_validate_flags,
+                      flag_args(work, "--codebook", str(tmp_path / "nope.json")))
+        assert "nope.json" in capsys.readouterr().err
+
+    def test_codebook_path_typo_at_validate_episodes_too(self, tmp_path, capsys):
+        # both stages take --codebook, so both need the same guard
+        work = make_work(tmp_path, turns=TURNS, episodes=EPISODES)
+        self._exits_2(interview.cmd_validate_episodes,
+                      args_for(work, "--codebook", str(tmp_path / "nope.json")))
+        assert "nope.json" in capsys.readouterr().err
+
+    def test_codebook_pointed_at_a_json_array_at_validate_episodes(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, episodes=EPISODES)
+        self._exits_2(interview.cmd_validate_episodes,
+                      args_for(work, "--codebook", str(work / "episodes.json")))
+        assert "expected a JSON dict" in capsys.readouterr().err
+
+    def test_codebook_pointed_at_a_json_array(self, tmp_path, capsys):
+        # --codebook work/episodes.json is a realistic slip; a list would blow up
+        # on codebook["markers"] several frames later
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS,
+                         episodes=EPISODES)
+        self._exits_2(interview.cmd_validate_flags,
+                      flag_args(work, "--codebook", str(work / "episodes.json")))
+        assert "expected a JSON dict" in capsys.readouterr().err
+
+    def test_codebook_pointed_at_some_other_object(self, tmp_path, capsys):
+        other = tmp_path / "sidecar.json"
+        other.write_text(json.dumps({"schema_version": "1.0"}), encoding="utf-8")
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
+        self._exits_2(interview.cmd_validate_flags,
+                      flag_args(work, "--codebook", str(other)))
+        assert "not a codebook" in capsys.readouterr().err
+
+
 class TestCmdValidateFlagsWiring:
     def test_moral_codebook_flags_pass_and_get_episode_ids(self, tmp_path, capsys):
         work = make_work(tmp_path, turns=TURNS, episodes=EPISODES, flags=MORAL_FLAGS)
         assert interview.cmd_validate_episodes(args_for(work)) == 0
         capsys.readouterr()
-        rc = interview.cmd_validate_flags(
-            args_for(work, duration="200", codebook=str(MORAL_CODEBOOK)))
+        rc = interview.cmd_validate_flags(flag_args(work, "--codebook", str(MORAL_CODEBOOK)))
         assert rc == 0, capsys.readouterr().out
         # stamped AND persisted — render/corpus read flags.json, not memory
         assert [f["episode_id"] for f in read(work, "flags.json")] == ["e01", "e02"]
@@ -139,14 +238,14 @@ class TestCmdValidateFlagsWiring:
         work = make_work(tmp_path, turns=TURNS, episodes=EPISODES, flags=MORAL_FLAGS)
         assert interview.cmd_validate_episodes(args_for(work)) == 0
         capsys.readouterr()
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 1
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
         assert "unknown marker 'attribution_of_blame'" in capsys.readouterr().out
 
     def test_default_codebook_unchanged(self, tmp_path, capsys):
         # shipped path, no diarized.json at all: no turns needed, no episodes,
         # flags left exactly as authored
         work = make_work(tmp_path, flags=NARRATIVE_FLAGS)
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 0
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
         out = capsys.readouterr().out
         assert "OK: 1 flags valid against codebook 1.0.0 (codebook.json)" in out
         assert read(work, "flags.json") == NARRATIVE_FLAGS
@@ -160,15 +259,14 @@ class TestCmdValidateFlagsWiring:
                   "quote": "huge success. We shipped it", "t_start": 1.0,
                   "t_end": 4.0, "salience": 2}]
         work = make_work(tmp_path, turns=turns, flags=flags)
-        assert interview.cmd_validate_flags(args_for(work, duration="10")) == 0
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
 
     def test_turns_are_passed_so_gate_codebook_does_not_raise(self, tmp_path, capsys):
         # codebook_moral_identity declares coding_scope AND
         # enforce_attribution_gate, so validate_flags RAISES when `turns` is
         # omitted. No episodes.json here: this isolates the turns= wiring.
         work = make_work(tmp_path, turns=TURNS, flags=MORAL_FLAGS)
-        rc = interview.cmd_validate_flags(
-            args_for(work, duration="200", codebook=str(MORAL_CODEBOOK)))
+        rc = interview.cmd_validate_flags(flag_args(work, "--codebook", str(MORAL_CODEBOOK)))
         assert rc == 0, capsys.readouterr().out
         # no episodes.json → flags stay unstamped
         assert all("episode_id" not in f for f in read(work, "flags.json"))
@@ -179,31 +277,24 @@ class TestCmdValidateFlagsWiring:
         turns = [dict(t) for t in TURNS]
         turns[1]["concordance"] = 0.6667
         work = make_work(tmp_path, turns=turns, flags=MORAL_FLAGS)
-        rc = interview.cmd_validate_flags(
-            args_for(work, duration="200", codebook=str(MORAL_CODEBOOK)))
+        rc = interview.cmd_validate_flags(flag_args(work, "--codebook", str(MORAL_CODEBOOK)))
         assert rc == 1
         assert "attribution_uncertain" in capsys.readouterr().out
 
-    def test_display_turn_without_episode_id_is_an_error(self, tmp_path, capsys):
-        # two adjacent same-label units, only one annotated: merge_labeled_turns
-        # DROPS the id rather than let one member speak for the other, so the
-        # display turn arrives unannotated. That means the episode stage did not
-        # run — coding flags against it must fail, not silently skip.
-        turns = [unit("t0001", 0.0, 4.0, "It was my driveway.", episode_id="e01"),
-                 unit("t0002", 5.0, 9.0, "Don't touch my property.")]
-        work = make_work(tmp_path, turns=turns, episodes=EPISODES,
-                         flags=NARRATIVE_FLAGS)
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 1
-        out = capsys.readouterr().out
-        assert "m0001" in out and "episode_id" in out
-        assert "validate-episodes" in out
-        assert all("episode_id" not in f for f in read(work, "flags.json"))
+    def test_unlabeled_turns_raise_naming_the_real_cause(self, tmp_path):
+        # `turns=None` would make validate_flags report "no turns were supplied"
+        # — turns WERE supplied, they are unlabeled, and its own message says so
+        bare = [{"id": "t0001", "start": 5.0, "end": 9.0,
+                 "text": "Don't touch my property."}]
+        work = make_work(tmp_path, turns=bare, flags=MORAL_FLAGS)
+        with pytest.raises(ValueError, match="missing label/concordance"):
+            interview.cmd_validate_flags(flag_args(work, "--codebook", str(MORAL_CODEBOOK)))
 
     def test_flag_outside_every_episode_errors_and_flags_are_not_saved(self, tmp_path, capsys):
         episodes = [{"id": "e01", "type": "to-camera", "t_start": 0.0, "t_end": 4.0}]
         turns = [unit("t0001", 0.0, 4.0, "Don't touch my property.", episode_id="e01")]
         work = make_work(tmp_path, turns=turns, episodes=episodes, flags=NARRATIVE_FLAGS)
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 1
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
         assert "outside every episode" in capsys.readouterr().out
         # the on-disk record must not gain a half-assigned episode_id: None
         assert read(work, "flags.json") == NARRATIVE_FLAGS
@@ -218,12 +309,75 @@ class TestCmdValidateFlagsWiring:
         assert read(work, "flags.json")[1]["episode_id"] == "e02"
 
 
+class TestTurnFlagDrift:
+    """Flags are stamped from episodes.json at validate-flags time; turns were
+    stamped at validate-episodes time. Nothing forces those two reads to be of
+    the same file, and under the moral codebook two episodes are two PEOPLE."""
+
+    def test_redrawn_boundary_without_rerunning_validate_episodes_is_caught(
+            self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, episodes=EPISODES, flags=MORAL_FLAGS)
+        assert interview.cmd_validate_episodes(args_for(work)) == 0
+        capsys.readouterr()
+        # the researcher moves the e01|e02 boundary from 100s to 3s and re-runs
+        # ONLY validate-flags — the between-stages hand-edit this layer is for
+        redrawn = [dict(EPISODES[0], t_end=3.0), dict(EPISODES[1], t_start=3.0)]
+        (work / "episodes.json").write_text(json.dumps(redrawn), encoding="utf-8")
+        rc = interview.cmd_validate_flags(flag_args(work, "--codebook", str(MORAL_CODEBOOK)))
+        assert rc == 1
+        out = capsys.readouterr().out
+        # m0002 holds t0002 (start 5.0): stamped e01, now contained by e02 —
+        # the flag quoting it would have been filed under a DIFFERENT target
+        assert "m0002" in out and "out of sync" in out, out
+        assert "re-run validate-episodes" in out, out
+        # and nothing was written against the divergent layer
+        assert all("episode_id" not in f for f in read(work, "flags.json"))
+
+    def test_display_turn_without_episode_id_is_still_caught(self, tmp_path, capsys):
+        # two adjacent same-label units, only one annotated: merge_labeled_turns
+        # DROPS the id rather than let one member speak for the other. A missing
+        # stamp is drift too — the same invariant, not a separate check.
+        turns = [unit("t0001", 0.0, 4.0, "It was my driveway.", episode_id="e01"),
+                 unit("t0002", 5.0, 9.0, "Don't touch my property.")]
+        work = make_work(tmp_path, turns=turns, episodes=EPISODES,
+                         flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        out = capsys.readouterr().out
+        assert "m0001" in out and "stamped None" in out
+        assert "re-run validate-episodes" in out
+        assert all("episode_id" not in f for f in read(work, "flags.json"))
+
+    def test_episodes_present_but_no_labeled_turn_layer_is_an_error(self, tmp_path, capsys):
+        # the clearest "the episode stage never ran" case: flags would be
+        # stamped and persisted while the turn layer was never annotated at all
+        work = make_work(tmp_path, episodes=EPISODES, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        assert "no labeled turn layer" in capsys.readouterr().out
+        assert read(work, "flags.json") == NARRATIVE_FLAGS
+
+    def test_unlabeled_turn_layer_is_the_same_error(self, tmp_path, capsys):
+        bare = [{"id": "t0001", "start": 5.0, "end": 9.0,
+                 "text": "Don't touch my property."}]
+        work = make_work(tmp_path, turns=bare, episodes=EPISODES, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        assert "no labeled turn layer" in capsys.readouterr().out
+        assert read(work, "flags.json") == NARRATIVE_FLAGS
+
+    def test_in_sync_layers_pass(self, tmp_path, capsys):
+        # the guard must not fire on the healthy path it sits astride
+        work = make_work(tmp_path, turns=TURNS, episodes=EPISODES, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_episodes(args_for(work)) == 0
+        capsys.readouterr()
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
+        assert read(work, "flags.json")[0]["episode_id"] == "e01"
+
+
 class TestShippedCodebookEndToEnd:
     """The narrative pipeline predates episodes and must be byte-unaffected."""
 
     def test_no_codebook_flag_reads_the_shipped_file(self, tmp_path, capsys):
         work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 0
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
         out = capsys.readouterr().out
         shipped = json.loads(SHIPPED_CODEBOOK.read_text(encoding="utf-8"))
         assert f"codebook {shipped['codebook_version']} (codebook.json)" in out
@@ -245,5 +399,5 @@ class TestShippedCodebookEndToEnd:
     def test_shipped_codebook_still_rejects_what_it_always_rejected(
             self, tmp_path, capsys, bad):
         work = make_work(tmp_path, turns=TURNS, flags=[bad])
-        assert interview.cmd_validate_flags(args_for(work, duration="200")) == 1
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
         assert "INVALID FLAGS" in capsys.readouterr().out

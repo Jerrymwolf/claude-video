@@ -361,6 +361,9 @@ def burst_timestamps(
 
 EPISODE_TYPES = {"confrontation", "commendation", "bystander", "to-camera"}
 EPISODE_REQUIRED = ("id", "type", "t_start", "t_end")
+# Dereferenced unconditionally downstream (assign_episode_ids, the CLI summary),
+# so no codebook may narrow them away. See _episode_required.
+EPISODE_STRUCTURAL = ("id", "t_start", "t_end")
 EPISODE_CONFRONTATION_REQUIRED = ("target_descriptor", "target_speech")
 ARC_PHASES = {"threat", "defense", "escalation", "softening", "flip", "repair", "exit"}
 ARC_OUTCOMES = {"complies", "refuses", "escalates", "partial", "n/a"}
@@ -394,10 +397,20 @@ def _episode_required(codebook: dict | None) -> tuple[tuple, tuple]:
     `episode_schema.required` actually enforces it instead of being silently
     ignored by a second copy in Python. Mirrors validate_flags reading
     `flag_schema.required`.
+
+    EPISODE_STRUCTURAL is the exception, and it is unioned in rather than
+    overridable: `id`/`t_start`/`t_end` are invariants of the DATA MODEL, not
+    codebook policy. assign_episode_ids dereferences `home["id"]` and the CLI
+    summary prints `e['t_start']`, so a codebook declaring `"required": ["type"]`
+    would otherwise validate clean and then crash with KeyError two lines later.
+    A codebook may ADD required fields; it may never remove the ones the
+    pipeline is built on.
     """
     schema = (codebook or {}).get("episode_schema") or {}
+    declared = tuple(schema.get("required") or EPISODE_REQUIRED)
+    required = declared + tuple(f for f in EPISODE_STRUCTURAL if f not in declared)
     return (
-        tuple(schema.get("required") or EPISODE_REQUIRED),
+        required,
         tuple(schema.get("confrontation_required") or EPISODE_CONFRONTATION_REQUIRED),
     )
 
@@ -430,8 +443,15 @@ def _containing_episode(t: float, episodes: list[dict]) -> dict | None:
     return None
 
 
-def _crossed_episodes(start: float, end: float, episodes: list[dict]) -> list[dict]:
-    """Episodes that BEGIN strictly inside the span (start, end).
+def _episodes_starting_inside(start: float, end: float, episodes: list[dict]) -> list[dict]:
+    """Episodes whose t_start lies in (start, end) — EXCLUSIVE at both ends.
+
+    Both bounds are load-bearing. Exclusive at the top: episodes are authored by
+    snapping to turn boundaries, and half-open containment puts the boundary
+    instant in the LATER episode, so a turn ending exactly at the next episode's
+    t_start holds none of its content — an inclusive bound would report every
+    correctly-drawn boundary. Exclusive at the bottom: a span that OPENS an
+    episode must not read as straddling into it.
 
     This is the straddle test, and it deliberately is NOT "does the span's end
     resolve to a different episode". A span ending in a GAP resolves to no
@@ -463,7 +483,7 @@ def validate_episodes(
     legal (silent B-roll holds no turns); coverage is enforced over turns —
     every turn's start must fall inside exactly one episode, and a turn that
     spans the START of any other episode is reported as straddling (see
-    _crossed_episodes): that is a mis-drawn boundary, and authoring time is the
+    _episodes_starting_inside): that is a mis-drawn boundary, and authoring time is the
     only point at which the researcher can still fix it. Arc objects are
     optional; when present their enums are checked (turning_point may be a turn
     id or the literal "off-camera" — arcs can turn before the camera ran).
@@ -548,7 +568,7 @@ def validate_episodes(
             orphans.append(f"{tid} (start {start})")
             continue
         if _is_num(end):
-            crossed = _crossed_episodes(float(start), float(end), episodes)
+            crossed = _episodes_starting_inside(float(start), float(end), episodes)
             if crossed:
                 names = ", ".join(str(e.get("id")) for e in crossed)
                 straddlers.append(f"{tid} ({home.get('id')} → {names})")
@@ -579,8 +599,8 @@ def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
     where a missing key is indistinguishable from an unassigned one.
 
     A flag that spans the START of any other episode is reported as straddling
-    (same predicate as validate_episodes — see _crossed_episodes) and filed
-    under its t_start's episode: a boundary drawn through a flag is a
+    (same predicate as validate_episodes — see _episodes_starting_inside) and
+    filed under its t_start's episode: a boundary drawn through a flag is a
     research-record problem, not something to resolve silently.
     """
     errors: list[str] = []
@@ -598,9 +618,36 @@ def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
             continue
         f["episode_id"] = home["id"]
         if _is_num(t_end):
-            crossed = _crossed_episodes(float(t_start), float(t_end), episodes)
+            crossed = _episodes_starting_inside(float(t_start), float(t_end), episodes)
             if crossed:
                 names = ", ".join(str(e.get("id")) for e in crossed)
                 errors.append(f"{ref}: straddles episodes {home['id']} → {names} "
                               f"(t_start {t_start}, t_end {t_end}); filed under {home['id']}")
     return errors
+
+
+def episode_drift(turns: list[dict], episodes: list[dict]) -> list[str]:
+    """Display turns whose stamped episode_id no longer matches containment.
+
+    Flags are stamped from episodes.json at validate-flags time, while turns
+    were stamped at validate-episodes time. Nothing forces those two reads to
+    be of the same file: a researcher re-draws a boundary and re-runs only
+    validate-flags — exactly the between-stages hand-editing this layer exists
+    for — and the two layers silently disagree. Under a codebook where episodes
+    are different PEOPLE, a flag then quotes a turn filed under one target and
+    is itself filed under another: the misattribution episodes exist to prevent.
+
+    The invariant is exact, not approximate. The merge barrier guarantees a
+    display turn never spans an episode, so its stamp must equal containment of
+    its own start — anything else, including a MISSING stamp (a turn whose units
+    disagreed, or a turn layer that was never annotated at all), is drift.
+    """
+    out: list[str] = []
+    for t in turns:
+        home = _containing_episode(float(t["start"]), episodes)
+        want = home["id"] if home else None
+        if t.get("episode_id") != want:
+            out.append(f"{t.get('id', '?')} (stamped {t.get('episode_id')!r}, "
+                       f"now falls in {want!r})")
+    return _capped(out, "display turn(s) out of sync with episodes.json — "
+                        "re-run validate-episodes")

@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import sys
+from collections import Counter
 from pathlib import Path
 
 import framegrab
@@ -19,6 +20,7 @@ from analyze import (
     build_turns,
     burst_timestamps,
     compute_concordance,
+    episode_drift,
     merge_labeled_turns,
     segment_turns,
     validate_episodes,
@@ -79,6 +81,55 @@ def out_dirs(media: Path, out_override: str | None) -> tuple[Path, Path]:
 
 def _load(path: Path) -> dict | list:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_checked(path: Path, expect: type | tuple = (dict, list)) -> dict | list:
+    """_load, but with actionable failures for HAND-AUTHORED inputs.
+
+    episodes.json and --codebook are written by a person (or by Claude) between
+    stages, so a trailing comma or a mistyped path is the expected failure, not
+    the exceptional one. A raw JSONDecodeError reports a line and column but no
+    filename, and work/ holds four JSON files; a raw FileNotFoundError reports a
+    traceback. Both read as crashes rather than as the fixable input errors they
+    are.
+
+    Exits 2, never 1: a broken input must stay distinguishable from a
+    legitimate validation finding, which is what 1 means at these stages.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: {path}: {exc.strerror or exc}", file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: {path.name}: line {exc.lineno} column {exc.colno} — {exc.msg}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    types = expect if isinstance(expect, tuple) else (expect,)
+    if not isinstance(data, types):
+        want = " or ".join(t.__name__ for t in types)
+        print(f"ERROR: {path.name}: expected a JSON {want}, got {type(data).__name__}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    return data
+
+
+def _load_codebook(args) -> tuple[Path, dict]:
+    """Resolve --codebook (default: the shipped narrative-gravity codebook).
+
+    `args.codebook` is read directly, not via getattr: every subparser offering
+    this stage defines the flag, and a defensive default would silently fall
+    back to the shipped codebook if a future subcommand forgot to wire it.
+    """
+    path = Path(args.codebook) if args.codebook else CODEBOOK_PATH
+    codebook = _load_checked(path, expect=dict)
+    if "codebook_version" not in codebook:
+        print(f"ERROR: {path.name}: not a codebook — no 'codebook_version' key "
+              f"(did you point --codebook at the wrong file?)", file=sys.stderr)
+        raise SystemExit(2)
+    return path, codebook
 
 
 def _save(path: Path, data) -> None:
@@ -262,7 +313,6 @@ def cmd_concordance(args) -> int:
         t["votes"] = scores[t["id"]]["votes"]
         t["invalid"] = scores[t["id"]]["invalid"]
     _save(work / "diarized.json", turns)
-    from collections import Counter
     counts = Counter(t["label"] for t in turns)
     print(f"PANELS: {len(panels)}  LABELS: {dict(counts)}")
     low = [t for t in turns if t["label"] == "UNCLEAR" or t["concordance"] < 1.0]
@@ -277,10 +327,16 @@ def cmd_validate_episodes(args) -> int:
     diarized unit. Runs between concordance and validate-flags: flags inherit
     their episode from the turn layer this stage annotates."""
     work = Path(args.work)
-    episodes = _load(work / "episodes.json")
-    turns = _load(work / "diarized.json")
-    codebook_path = Path(args.codebook) if getattr(args, "codebook", None) else CODEBOOK_PATH
-    errors = validate_episodes(episodes, turns, codebook=_load(codebook_path))
+    episodes = _load_checked(work / "episodes.json", expect=list)
+    turns = _load_checked(work / "diarized.json", expect=list)
+    _, codebook = _load_codebook(args)
+    if not turns:
+        # An episode layer covering nothing is not a valid episode layer: every
+        # episode would print turns=0 and the stage would report success.
+        print("ERROR: diarized.json holds no turns — run concordance first",
+              file=sys.stderr)
+        return 1
+    errors = validate_episodes(episodes, turns, codebook=codebook)
     if errors:
         print("INVALID EPISODES:")
         for e in errors:
@@ -288,7 +344,6 @@ def cmd_validate_episodes(args) -> int:
         return 1
     assign_episode_ids(turns, episodes)
     _save(work / "diarized.json", turns)
-    from collections import Counter
     per_ep = Counter(t["episode_id"] for t in turns)
     print(f"EPISODES: {len(episodes)}")
     for e in episodes:
@@ -302,15 +357,15 @@ def cmd_validate_episodes(args) -> int:
 def cmd_validate_flags(args) -> int:
     work = Path(args.work)
     flags = _load(work / "flags.json")
-    codebook_path = Path(args.codebook) if getattr(args, "codebook", None) else CODEBOOK_PATH
-    codebook = _load(codebook_path)
+    codebook_path, codebook = _load_codebook(args)
     duration = float(args.duration) if args.duration else float("inf")
     if not args.duration and (work / "final_transcript.json").exists():
         segments = _load(work / "final_transcript.json")
         if segments:  # auto-derive: last segment end ≈ media duration
             duration = float(segments[-1]["end"])
     transcript_text = None
-    merged = None
+    turns = None      # unit-level, exactly as concordance wrote them
+    merged = None     # display turns; None when the units are not labeled yet
     if (work / "diarized.json").exists():
         turns = _load(work / "diarized.json")
         if turns and all("label" in t for t in turns):
@@ -320,26 +375,27 @@ def cmd_validate_flags(args) -> int:
             transcript_text = "\n".join(t["text"] for t in merged)
         else:
             transcript_text = "\n".join(t["text"] for t in turns)
-    # `turns=merged` is load-bearing, not a convenience: a codebook declaring
+    # `turns=` is load-bearing, not a convenience: a codebook declaring
     # coding_scope or enforce_attribution_gate RAISES without turns rather than
-    # silently skipping its attribution guarantees.
+    # silently skipping its attribution guarantees. Unlabeled units are handed
+    # over as-is rather than as None, so validate_flags reports the real cause
+    # ("run concordance first") instead of the inaccurate "no turns supplied".
     errors = validate_flags(flags, codebook, duration,
-                            transcript_text=transcript_text, turns=merged)
+                            transcript_text=transcript_text,
+                            turns=merged if merged is not None else turns)
     ep_path = work / "episodes.json"
     if not errors and ep_path.exists():
-        # merge_labeled_turns drops episode_id when its members disagree. After
-        # validate-episodes every unit carries one (assign_episode_ids raises on
-        # orphans), so a display turn without one means the episode stage never
-        # ran, or ran against units that have since changed — report it instead
-        # of quietly coding flags against a half-annotated turn layer.
-        stale = [t.get("id", "?") for t in (merged or []) if "episode_id" not in t]
-        if stale:
-            more = f" (+{len(stale) - 5} more)" if len(stale) > 5 else ""
-            errors = [f"{len(stale)} display turn(s) carry no episode_id — their "
-                      f"units disagreed or were never annotated; re-run "
-                      f"validate-episodes: {', '.join(stale[:5])}{more}"]
+        episodes = _load_checked(ep_path, expect=list)
+        if merged is None:
+            # Stamping flags now would file them against an episode layer the
+            # turns were never reconciled with — half the record annotated.
+            errors = ["episodes.json is present but there is no labeled turn "
+                      "layer to reconcile it against — run concordance, then "
+                      "validate-episodes, before validate-flags"]
         else:
-            errors = assign_flag_episodes(flags, _load(ep_path))
+            errors = episode_drift(merged, episodes)
+        if not errors:
+            errors = assign_flag_episodes(flags, episodes)
             if not errors:
                 _save(work / "flags.json", flags)
     if errors:
@@ -457,7 +513,6 @@ def cmd_render(args) -> int:
 def cmd_corpus_summary(args) -> int:
     folder = Path(args.folder)
     sidecars = sorted(folder.glob("*_interview/sidecar.json"))
-    from collections import Counter
     by_marker, by_emotion = Counter(), Counter()
     rows = []
     for path in sidecars:
@@ -480,7 +535,14 @@ def cmd_corpus_summary(args) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The full subcommand parser.
+
+    Split out of main() so tests can build their `args` THROUGH it rather than
+    hand-rolling a namespace: a hand-rolled one is a second copy of this
+    contract, and it keeps passing after a subcommand gains an argument the
+    real CLI now requires.
+    """
     parser = argparse.ArgumentParser(prog="interview.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -500,8 +562,11 @@ def main() -> int:
     p.add_argument("--other", metavar="NAME", help="display name for OTHER turns")
     p.add_argument("--unclear", metavar="NAME", help="display name for UNCLEAR turns")
     p = sub.add_parser("corpus-summary"); p.add_argument("folder")
+    return parser
 
-    args = parser.parse_args()
+
+def main() -> int:
+    args = build_parser().parse_args()
     handlers = {
         "preflight": cmd_preflight, "setup": cmd_setup, "discover": cmd_discover,
         "transcribe": cmd_transcribe, "finalize": cmd_finalize,

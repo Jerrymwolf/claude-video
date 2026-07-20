@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import analyze
-from analyze import (assign_episode_ids, assign_flag_episodes,
+from analyze import (assign_episode_ids, assign_flag_episodes, episode_drift,
                      merge_labeled_turns, validate_episodes)
 
 MORAL = json.loads((Path(__file__).resolve().parent.parent / "skills" / "interview"
@@ -208,6 +208,22 @@ class TestCodebookDrivenRequiredFields:
         errs = validate_episodes([ep("e01", "confrontation", 0.0, 200.0)], TURNS, codebook=cb)
         assert any("confrontation requires a target_role" in e for e in errs)
 
+    def test_structural_fields_survive_a_codebook_that_narrows_required(self):
+        # `id`/`t_start`/`t_end` are data-model invariants, not codebook policy:
+        # assign_episode_ids dereferences home["id"] and the CLI summary prints
+        # e['t_start'], so a codebook allowed to drop them would validate clean
+        # and then crash with KeyError. A codebook may ADD, never remove.
+        cb = {"episode_schema": {"required": ["type"]}}
+        errs = validate_episodes([{"type": "to-camera"}], TURNS, codebook=cb)
+        for field in ("id", "t_start", "t_end"):
+            assert any(f"missing required field '{field}'" in e for e in errs), (field, errs)
+
+    def test_narrowed_required_still_enforces_the_codebook_addition(self):
+        # the union must not swallow the codebook's own declaration
+        cb = {"episode_schema": {"required": ["summary"]}}
+        errs = validate_episodes([ep("e01", "to-camera", 0.0, 200.0)], TURNS, codebook=cb)
+        assert any("missing required field 'summary'" in e for e in errs), errs
+
     def test_target_speech_keeps_its_bool_rule_when_codebook_declares_it(self):
         cb = {"episode_schema": {"confrontation_required": ["target_speech"]}}
         e = ep("e01", "confrontation", 0.0, 200.0, target_speech="yes")
@@ -355,6 +371,55 @@ class TestAssignment:
         errs = assign_flag_episodes(flags, EPISODES)
         assert any("g0004" in e and "t_start must be a number" in e for e in errs)
         assert flags[0]["episode_id"] is None
+
+
+class TestEpisodeDrift:
+    """The turn layer is stamped at validate-episodes time and the flag layer at
+    validate-flags time; nothing forces those two reads of episodes.json to
+    agree. The merge barrier guarantees a display turn never spans an episode,
+    so its stamp must EQUAL containment of its own start."""
+
+    def stamped(self, tid, t0, t1, eid):
+        return {"id": tid, "start": t0, "end": t1, "text": "x",
+                "label": "INTERVIEWEE", "concordance": 1.0, "episode_id": eid}
+
+    def test_in_sync_layer_reports_nothing(self):
+        turns = [self.stamped("m0001", 50.0, 55.0, "e01"),
+                 self.stamped("m0002", 110.0, 112.0, "e02"),
+                 self.stamped("m0003", 130.0, 133.0, "e03")]
+        assert episode_drift(turns, EPISODES) == []
+
+    def test_moved_boundary_is_reported(self):
+        # e01 shrinks to 0-40, so the turn at 50 now belongs to a later episode
+        redrawn = [ep("e01", "confrontation", 0.0, 40.0),
+                   ep("e02", "commendation", 40.0, 200.0)]
+        errs = episode_drift([self.stamped("m0001", 50.0, 55.0, "e01")], redrawn)
+        assert any("m0001" in e and "out of sync" in e for e in errs), errs
+        assert any("stamped 'e01'" in e and "'e02'" in e for e in errs), errs
+
+    def test_missing_stamp_is_drift_too(self):
+        bare = {"id": "m0001", "start": 50.0, "end": 55.0, "text": "x",
+                "label": "INTERVIEWEE", "concordance": 1.0}
+        errs = episode_drift([bare], EPISODES)
+        assert any("m0001" in e and "stamped None" in e for e in errs), errs
+
+    def test_turn_now_orphaned_by_the_redraw_is_reported(self):
+        # the redraw can also leave a turn in no episode at all
+        redrawn = [ep("e01", "to-camera", 0.0, 10.0)]
+        errs = episode_drift([self.stamped("m0001", 50.0, 55.0, "e01")], redrawn)
+        assert any("m0001" in e and "now falls in None" in e for e in errs), errs
+
+    def test_message_names_the_remedy(self):
+        errs = episode_drift([self.stamped("m0001", 50.0, 55.0, "e99")], EPISODES)
+        assert "re-run validate-episodes" in errs[0], errs
+
+    def test_drift_errors_are_capped(self):
+        # a single moved boundary drifts every turn behind it
+        turns = [self.stamped(f"m{i:04d}", 50.0 + i, 51.0 + i, "e99") for i in range(8)]
+        errs = episode_drift(turns, EPISODES)
+        assert len(errs) == 1
+        assert errs[0].startswith("8 display turn(s) out of sync")
+        assert "+3 more" in errs[0]
 
 
 class TestCodebookDrivenEnums:
