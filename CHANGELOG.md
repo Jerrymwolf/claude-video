@@ -1,6 +1,9 @@
 # Changelog
 
-All notable changes to `/watch` are documented here.
+All notable changes to `/watch` are documented here. `/watch` is the upstream
+skill and keeps its own version line; the **Gravitas** product (`/interview`)
+versions independently and is documented in
+[`CHANGELOG-gravitas.md`](CHANGELOG-gravitas.md).
 
 ## [0.2.0] — 2026-06-29
 

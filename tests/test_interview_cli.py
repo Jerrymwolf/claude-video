@@ -290,9 +290,11 @@ class TestCmdValidateFlagsWiring:
         assert "unknown marker 'attribution_of_blame'" in capsys.readouterr().out
 
     def test_default_codebook_unchanged(self, tmp_path, capsys):
-        # shipped path, no diarized.json at all: no turns needed, no episodes,
-        # flags left exactly as authored
-        work = make_work(tmp_path, flags=NARRATIVE_FLAGS)
+        # shipped path: no --codebook, no episodes, flags left exactly as
+        # authored. The turn layer is in the fixture because the quote check is
+        # no longer skippable (TestQuoteCheckCannotBeSkipped) — every assertion
+        # below is the one this test always made.
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
         assert interview.cmd_validate_flags(flag_args(work)) == 0
         out = capsys.readouterr().out
         assert "OK: 1 flags valid against codebook 1.0.0 (codebook.json)" in out
@@ -397,10 +399,15 @@ class TestTurnFlagDrift:
 
     def test_episodes_present_but_no_labeled_turn_layer_is_an_error(self, tmp_path, capsys):
         # the clearest "the episode stage never ran" case: flags would be
-        # stamped and persisted while the turn layer was never annotated at all
+        # stamped and persisted while the turn layer was never annotated at all.
+        # With diarized.json missing outright the quote check now refuses one
+        # step earlier and names the missing file — a strictly more specific
+        # message for this fixture. The "no labeled turn layer" wording stays
+        # pinned by test_unlabeled_turn_layer_is_the_same_error below, where a
+        # turn layer exists but carries no labels.
         work = make_work(tmp_path, episodes=EPISODES, flags=NARRATIVE_FLAGS)
         assert interview.cmd_validate_flags(flag_args(work)) == 1
-        assert "no labeled turn layer" in capsys.readouterr().out
+        assert "diarized.json is absent" in capsys.readouterr().out
         assert read(work, "flags.json") == NARRATIVE_FLAGS
 
     def test_unlabeled_turn_layer_is_the_same_error(self, tmp_path, capsys):
@@ -418,6 +425,128 @@ class TestTurnFlagDrift:
         capsys.readouterr()
         assert interview.cmd_validate_flags(flag_args(work)) == 0
         assert read(work, "flags.json")[0]["episode_id"] == "e01"
+
+
+class TestQuoteCheckCannotBeSkipped:
+    """A work dir with no turn layer used to skip the verbatim-quote check
+    entirely and still print the OK line SKILL.md designates as quote
+    provenance — a fabricated quote validated clean at exit 0. cmd_render
+    already refuses on exactly this condition ("run concordance first"); this
+    stage now agrees with it. Exit 1, like every other not-ready-yet refusal in
+    this file: the invocation was fine, the pipeline was run out of order."""
+
+    FABRICATED = [dict(NARRATIVE_FLAGS[0],
+                       quote="I INVENTED THIS QUOTE, IT IS NOWHERE IN THE TRANSCRIPT")]
+
+    def test_fabricated_quote_cannot_earn_the_ok_line(self, tmp_path, capsys):
+        work = make_work(tmp_path, flags=self.FABRICATED)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        out = capsys.readouterr().out
+        assert "OK:" not in out
+        assert "diarized.json" in out            # the missing file
+        assert "quote check cannot run" in out   # the consequence
+        assert "concordance" in out              # the way out
+
+    def test_a_true_quote_is_refused_the_same_way(self, tmp_path, capsys):
+        # the refusal is "could this have been checked", not "was it wrong":
+        # an unverified quote is not evidence even when it happens to be exact
+        work = make_work(tmp_path, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        assert "diarized.json" in capsys.readouterr().out
+        assert read(work, "flags.json") == NARRATIVE_FLAGS
+
+    def test_the_same_flags_pass_once_the_turn_layer_is_there(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
+        assert "OK: 1 flags" in capsys.readouterr().out
+
+    def test_a_flag_set_with_no_quotes_needs_no_turn_layer(self, tmp_path, capsys):
+        # the refusal is about quotes, not about the file's existence — an
+        # empty flag list has nothing that could be checked
+        work = make_work(tmp_path, flags=[])
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
+        assert "OK: 0 flags" in capsys.readouterr().out
+
+    def test_a_quoteless_flag_is_told_it_omitted_its_quote(self, tmp_path, capsys):
+        # A NON-EMPTY flag set carrying no quotes. Nothing here could have been
+        # checked against a transcript, so the refusal above must not fire and
+        # steal the finding — this flag's real problem is the missing `quote`,
+        # and being told the transcript is absent instead would send the
+        # researcher to the wrong stage. (An empty list is empty whatever the
+        # predicate, so it cannot pin this on its own.)
+        bare = {k: v for k, v in NARRATIVE_FLAGS[0].items() if k != "quote"}
+        work = make_work(tmp_path, flags=[bare])
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        out = capsys.readouterr().out
+        assert "missing required field 'quote'" in out
+        assert "diarized.json" not in out
+
+    def test_an_empty_turn_layer_is_the_substring_finding_not_this_one(
+            self, tmp_path, capsys):
+        # diarized.json present but empty: the check CAN run, and it fails.
+        # Pins `transcript_text is None` against a `not transcript_text` slip,
+        # which would trade a precise finding for a misleading one.
+        work = make_work(tmp_path, turns=[], flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1
+        out = capsys.readouterr().out
+        assert "not a verbatim substring" in out
+        assert "diarized.json" not in out
+
+    def test_moral_codebook_without_a_turn_layer_is_a_finding_not_a_traceback(
+            self, tmp_path, capsys):
+        work = make_work(tmp_path, flags=MORAL_FLAGS)
+        assert interview.cmd_validate_flags(
+            flag_args(work, "--codebook", str(MORAL_CODEBOOK))) == 1
+        assert "diarized.json" in capsys.readouterr().out
+
+    def test_moral_codebook_with_no_flags_at_all_is_a_finding_too(
+            self, tmp_path, capsys):
+        # No quotes, so the quote refusal above does not fire — but the
+        # codebook's own coding_scope/gate declaration still demands turns and
+        # validate_flags raises for it. That raise is a precondition failure,
+        # not a crash, and must reach the user as a finding rather than as a
+        # bare traceback out of this stage.
+        work = make_work(tmp_path, flags=[])
+        assert interview.cmd_validate_flags(
+            flag_args(work, "--codebook", str(MORAL_CODEBOOK))) == 1
+        out = capsys.readouterr().out
+        assert "turn-level validation cannot be skipped" in out
+        assert "diarized.json" in out
+
+    # An unlabeled turn layer keeps raising ValueError with its own accurate
+    # message — pinned by TestCmdValidateFlagsWiring
+    # .test_unlabeled_turns_raise_naming_the_real_cause, which is what stops the
+    # conversion above from swallowing every raise indiscriminately.
+
+
+class TestCodebookProvenance:
+    """Nothing in the work dir recorded which codebook validate-flags accepted
+    the flags against, so omitting --codebook at render wrote
+    `codebook_file: "codebook.json"` into a sidecar full of moral-identity
+    markers — the research record claiming the wrong construct, at exit 0."""
+
+    def test_validate_flags_records_the_codebook_it_used(self, tmp_path, capsys):
+        work = make_work(tmp_path, turns=TURNS, flags=MORAL_FLAGS)
+        assert interview.cmd_validate_flags(
+            flag_args(work, "--codebook", str(MORAL_CODEBOOK))) == 0, \
+            capsys.readouterr().out
+        assert read(work, "codebook_ref.json") == {
+            "codebook_file": "codebook_moral_identity.json",
+            "codebook_version": "1.0.0"}
+
+    def test_the_shipped_codebook_is_recorded_too(self, tmp_path):
+        work = make_work(tmp_path, turns=TURNS, flags=NARRATIVE_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 0
+        assert read(work, "codebook_ref.json") == {
+            "codebook_file": "codebook.json", "codebook_version": "1.0.0"}
+
+    def test_a_failing_run_records_nothing(self, tmp_path, capsys):
+        # provenance for an ACCEPTED flag set. Recording a rejected run would
+        # have render cross-check against a codebook that validated nothing.
+        work = make_work(tmp_path, turns=TURNS, flags=MORAL_FLAGS)
+        assert interview.cmd_validate_flags(flag_args(work)) == 1  # shipped codebook
+        assert "unknown marker" in capsys.readouterr().out
+        assert not (work / "codebook_ref.json").exists()
 
 
 class TestShippedCodebookEndToEnd:
@@ -658,3 +787,106 @@ class TestCmdRenderSidecar:
         sc = sidecar_of(base)
         assert sc["speaker_names"] == {"INTERVIEWEE": "Participant"}
         assert sc["interview"]["persona"] == "Agent Sebastian"
+
+
+# A codebook that accepts NARRATIVE_FLAGS, written to tmp_path so a test can
+# edit it BETWEEN validate-flags and render — the drift the cross-check exists
+# to catch, staged without touching a shipped file.
+MINIMAL_CODEBOOK = {
+    "codebook_version": "1.0.0",
+    "markers": [{"id": "emotional_display", "requires_emotion": True}],
+    "emotions": ["anger"],
+    "flag_schema": {"required": ["id", "marker_types", "quote", "t_start",
+                                 "t_end", "salience"]},
+}
+
+
+def record_codebook(base, *extra):
+    """Produce work/codebook_ref.json the way the pipeline does — by running
+    the real validate-flags stage. Hand-writing the file would let that stage
+    rename a key and leave render's cross-check passing against a fixture
+    nobody produces."""
+    assert interview.cmd_validate_flags(flag_args(base / "work", *extra)) == 0
+
+
+class TestRenderCodebookCrossCheck:
+    """render resolves --codebook independently of validate-flags, so omitting
+    it on a moral-identity run wrote the wrong construct into the sidecar at
+    exit 0. It now refuses when the two disagree."""
+
+    @pytest.fixture(autouse=True)
+    def _unprobeable_media(self, monkeypatch):
+        def unprobeable(path):
+            raise SystemExit("ffprobe failed")
+        monkeypatch.setattr(interview.framegrab, "get_metadata", unprobeable)
+
+    def test_render_refuses_a_codebook_validate_flags_did_not_use(
+            self, tmp_path, capsys):
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)
+        record_codebook(base, "--codebook", str(MORAL_CODEBOOK))
+        capsys.readouterr()
+        assert interview.cmd_render(render_args(media, base)) == 1
+        err = capsys.readouterr().err
+        assert "codebook_moral_identity.json" in err   # what validated the flags
+        assert "codebook.json" in err                  # what render resolved
+        assert "--codebook" in err                     # what to do about it
+        # nothing written: a refused render must leave no artifact behind
+        assert not (base / "sidecar.json").exists()
+        assert not (base / "transcript.docx").exists()
+
+    def test_render_accepts_the_recorded_codebook(self, tmp_path, capsys):
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)
+        record_codebook(base, "--codebook", str(MORAL_CODEBOOK))
+        capsys.readouterr()
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(MORAL_CODEBOOK))) == 0
+        assert sidecar_of(base)["codebook_file"] == "codebook_moral_identity.json"
+
+    def test_the_shipped_path_round_trips_with_no_flag_on_either_stage(
+            self, tmp_path, capsys):
+        media, base = make_render_dirs(tmp_path)
+        record_codebook(base)
+        capsys.readouterr()
+        assert interview.cmd_render(render_args(media, base)) == 0
+        assert sidecar_of(base)["codebook_file"] == "codebook.json"
+
+    def test_an_older_work_dir_with_no_record_stays_permissive(self, tmp_path):
+        # work dirs produced before this record existed must keep rendering
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)
+        assert not (base / "work" / "codebook_ref.json").exists()
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(MORAL_CODEBOOK))) == 0
+
+    def test_a_codebook_edited_between_the_two_stages_is_caught(
+            self, tmp_path, capsys):
+        # same file NAME, different version: the marker set the flags were
+        # validated against is not the one about to be recorded
+        cb = tmp_path / "study.json"
+        cb.write_text(json.dumps(MINIMAL_CODEBOOK), encoding="utf-8")
+        media, base = make_render_dirs(tmp_path)
+        record_codebook(base, "--codebook", str(cb))
+        cb.write_text(json.dumps(dict(MINIMAL_CODEBOOK, codebook_version="9.9.9")),
+                      encoding="utf-8")
+        capsys.readouterr()
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(cb))) == 1
+        err = capsys.readouterr().err
+        assert "1.0.0" in err and "9.9.9" in err
+        assert not (base / "sidecar.json").exists()
+
+    def test_a_malformed_record_exits_2_naming_the_file(self, tmp_path, capsys):
+        media, base = make_render_dirs(tmp_path)
+        (base / "work" / "codebook_ref.json").write_text("{oops", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            interview.cmd_render(render_args(media, base))
+        assert exc.value.code == 2
+        assert "codebook_ref.json" in capsys.readouterr().err
+
+    def test_main_dispatches_the_cross_check(self, tmp_path, monkeypatch, capsys):
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)
+        record_codebook(base, "--codebook", str(MORAL_CODEBOOK))
+        capsys.readouterr()
+        monkeypatch.setattr(sys, "argv", [
+            "interview.py", "render", str(media), "--out-dir", str(base)])
+        assert interview.main() == 1
+        assert "codebook_moral_identity.json" in capsys.readouterr().err

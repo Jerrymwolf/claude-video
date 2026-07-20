@@ -22,6 +22,10 @@ TURNS = [
                  "It was 2019 and I was furious about the layoff decision.", "INTERVIEWEE"),
 ]
 
+# Sentinel for "delete this key" in the per-field comment fixtures below; None
+# would only test the falsy branch, not the absent one.
+_ABSENT = object()
+
 FLAGS = [{
     "id": "g0001",
     "marker_types": ["emotional_display"],
@@ -243,6 +247,74 @@ class TestDocx:
         doc = build_docx_parts(TURNS, FLAGS)["word/document.xml"]
         assert "[00:00] INTERVIEWER:" in doc
         assert "[00:06] INTERVIEWEE:" in doc
+
+
+class TestFlagCommentFields:
+    """The .docx comment is the human coding surface for document-based review,
+    so every codebook-declared field a flag actually carries must reach it. The
+    sidecar was already complete; the comment read `emotion` alone, so a
+    codebook declaring `affect_field: "affect"` lost its affect entirely, along
+    with speaker_role, episode_id and attribution_uncertain."""
+
+    @staticmethod
+    def comment_text(**over):
+        """Text of the single comment for one flag built from FLAGS[0]."""
+        flag = dict(FLAGS[0])
+        flag.update(over)
+        for key, value in list(flag.items()):
+            if value is _ABSENT:
+                del flag[key]
+        parts = build_docx_parts(TURNS, [flag])
+        root = ET.fromstring(parts["word/comments.xml"])
+        return "".join(t.text or "" for t in root.iter(f"{W}t"))
+
+    def test_moral_flag_fields_all_reach_the_comment(self):
+        text = self.comment_text(emotion=_ABSENT, affect="contempt",
+                                 speaker_role="INTERVIEWEE", episode_id="e01",
+                                 marker_types=["displacement_of_responsibility"])
+        assert "speaker: INTERVIEWEE" in text
+        assert "episode: e01" in text
+        assert "affect: contempt" in text
+        assert "displacement_of_responsibility" in text
+
+    def test_narrative_flag_keeps_the_emotion_label(self):
+        # the shipped narrative path must be byte-unchanged: its flags carry
+        # `emotion`, and relabelling it "affect" would rewrite every existing
+        # narrative .docx for no evidentiary gain
+        text = self.comment_text()
+        assert "emotion: anger" in text
+        assert "affect" not in text
+
+    def test_affect_wins_when_a_flag_carries_both(self):
+        # a codebook-declared affect_field is the authority; a stale `emotion`
+        # left behind by copy-editing a narrative codebook must not win
+        text = self.comment_text(affect="contempt", emotion="anger", note=_ABSENT)
+        assert "affect: contempt" in text
+        assert "emotion:" not in text and "anger" not in text
+
+    def test_attribution_uncertain_shows_only_when_true(self):
+        assert "attribution uncertain" in self.comment_text(attribution_uncertain=True)
+        assert "attribution uncertain" not in self.comment_text(
+            attribution_uncertain=False)
+        assert "attribution uncertain" not in self.comment_text()
+
+    def test_absent_fields_leave_no_empty_segments(self):
+        text = self.comment_text(emotion=_ABSENT, note=_ABSENT,
+                                 frame_paths=_ABSENT, visual_evidence=_ABSENT)
+        assert "speaker:" not in text and "episode:" not in text
+        # "emotion:" not "emotion" — the marker id is `emotional_display`
+        assert "affect" not in text and "emotion:" not in text
+        assert "|  |" not in text and "| |" not in text
+        assert not text.endswith("|") and not text.endswith("| ")
+
+    def test_segments_stay_pipe_delimited_and_terse(self):
+        text = self.comment_text(emotion=_ABSENT, affect="contempt",
+                                 speaker_role="INTERVIEWEE", episode_id="e01",
+                                 attribution_uncertain=True, note=_ABSENT,
+                                 visual_evidence=_ABSENT)
+        assert text == ("GRAVITY [emotional_display] | speaker: INTERVIEWEE | "
+                        "attribution uncertain | episode: e01 | affect: contempt | "
+                        "salience 4/5 | t=00:08-00:11 | frames: 1")
 
 
 class TestSidecar:

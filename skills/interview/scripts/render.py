@@ -56,10 +56,41 @@ def _run(text: str, bold: bool = False) -> str:
 
 
 def _flag_comment_text(flag: dict) -> str:
+    """One terse pipe-delimited line per flag, for the Word comment.
+
+    The .docx is the human coding surface in document-based review, so every
+    field the flag actually carries belongs here — the sidecar being complete
+    is not enough for a reviewer working from the document alone. Absent fields
+    contribute no segment, so a narrative flag and a moral-identity flag both
+    render without empty gaps.
+
+    `affect` (the moral codebook's declared `affect_field`) is read ahead of
+    `emotion` (the shipped narrative codebook's), and the LABEL follows the key
+    the flag actually carries rather than being normalized to one word: a
+    narrative flag still renders "emotion: anger" exactly as it always did.
+
+    The "GRAVITY" prefix stays literal under every codebook. It is a fixed
+    marker that this line is tool-emitted — the same job w:author does — not a
+    construct name; the marker ids in brackets already identify the construct
+    unambiguously, and the sidecar records `codebook_file`. Deriving it would
+    mean either a new codebook field (out of scope) or synthesizing a label
+    from a filename, and changing it would rewrite every existing narrative
+    .docx for no gain in evidentiary precision.
+    """
     markers = ", ".join(flag.get("marker_types") or [])
     bits = [f"GRAVITY [{markers}]"]
-    if flag.get("emotion"):
-        bits.append(f"emotion: {flag['emotion']}")
+    if flag.get("speaker_role"):
+        bits.append(f"speaker: {flag['speaker_role']}")
+    if flag.get("attribution_uncertain"):
+        # Shown only when set: the codebook requires it TRUE on flags quoting a
+        # turn the panel could not attribute cleanly, so its absence is the
+        # normal state and printing "certain" everywhere would be noise.
+        bits.append("attribution uncertain")
+    if flag.get("episode_id"):
+        bits.append(f"episode: {flag['episode_id']}")
+    affect_field = "affect" if flag.get("affect") else "emotion"
+    if flag.get(affect_field):
+        bits.append(f"{affect_field}: {flag[affect_field]}")
     if flag.get("salience") is not None:
         bits.append(f"salience {flag['salience']}/5")
     bits.append(f"t={format_hms(flag.get('t_start', 0))}-{format_hms(flag.get('t_end', 0))}")

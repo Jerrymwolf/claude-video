@@ -33,6 +33,14 @@ from render import build_docx_parts, build_sidecar, format_hms, write_docx
 MEDIA_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4a", ".wav", ".mp3", ".aac", ".flac"}
 AUDIO_ONLY_EXTS = {".m4a", ".wav", ".mp3", ".aac", ".flac"}
 CODEBOOK_PATH = Path(__file__).resolve().parent / "codebook.json"
+# Written into the work dir by a SUCCESSFUL validate-flags, read by render.
+# The two stages resolve --codebook independently, and nothing else in the work
+# dir says which codebook the flags were actually accepted against — so without
+# this file, omitting --codebook at render records the wrong construct in the
+# sidecar at exit 0. Name + version: the two codebooks are both at 1.0.0, so
+# the version alone cannot discriminate them, and the name alone cannot catch a
+# codebook edited between the two stages.
+CODEBOOK_REF = "codebook_ref.json"
 
 # Keys live in the same file /watch uses, so a machine with either skill shares
 # one config. stt.load_api_key reads this path (plus env and ./.env).
@@ -388,14 +396,51 @@ def cmd_validate_flags(args) -> int:
             transcript_text = "\n".join(t["text"] for t in merged)
         else:
             transcript_text = "\n".join(t["text"] for t in turns)
-    # `turns=` is load-bearing, not a convenience: a codebook declaring
-    # coding_scope or enforce_attribution_gate RAISES without turns rather than
-    # silently skipping its attribution guarantees. Unlabeled units are handed
-    # over as-is rather than as None, so validate_flags reports the real cause
-    # ("run concordance first") instead of the inaccurate "no turns supplied".
-    errors = validate_flags(flags, codebook, duration,
-                            transcript_text=transcript_text,
-                            turns=merged if merged is not None else turns)
+    quoted = [flag.get("id", f"flags[{i}]")
+              for i, flag in enumerate(flags) if flag.get("quote")]
+    if transcript_text is None and quoted:
+        # Fail closed on the tool's central evidentiary promise. Without
+        # diarized.json there is nothing to check a quote against, and this
+        # stage used to skip the check silently and still print the OK line
+        # SKILL.md designates as quote provenance — a fabricated quote could
+        # not be contradicted because nothing was there to contradict it.
+        # cmd_render refuses on exactly this condition a few dozen lines below
+        # ("run concordance first"); the two now agree.
+        #
+        # Exit 1, not 2: the command line was well-formed, the pipeline was run
+        # out of order — the same shape (and the same exit code) as every other
+        # not-ready-yet refusal here and in cmd_render. Exit 2 is reserved for
+        # broken hand-authored input, which this is not.
+        errors = [f"work/diarized.json is absent, so the verbatim-quote check "
+                  f"cannot run against {len(quoted)} flag(s) carrying a quote "
+                  f"({', '.join(quoted[:5])}) — run concordance, and "
+                  f"validate-episodes if this run has an episode layer, before "
+                  f"validate-flags"]
+    else:
+        # `turns=` is load-bearing, not a convenience: a codebook declaring
+        # coding_scope or enforce_attribution_gate RAISES without turns rather
+        # than silently skipping its attribution guarantees. Unlabeled units are
+        # handed over as-is rather than as None, so validate_flags reports the
+        # real cause ("run concordance first") instead of the inaccurate "no
+        # turns supplied".
+        try:
+            errors = validate_flags(flags, codebook, duration,
+                                    transcript_text=transcript_text,
+                                    turns=merged if merged is not None else turns)
+        except ValueError as exc:
+            if turns is not None:
+                # A turn layer EXISTS but is unlabeled. validate_flags' own
+                # message already names that cause precisely; re-raising keeps
+                # it, and keeps this except from swallowing raises that mean
+                # something other than "the stage before this never ran".
+                raise
+            # No turn layer at all, and no quotes to have caught it above (an
+            # empty or quote-less flag set): the codebook's own
+            # coding_scope/gate declaration is what demands turns here. A real
+            # precondition failure, so it reaches the user as a finding rather
+            # than as a bare traceback out of this stage.
+            errors = [f"{exc} — work/diarized.json is absent; run concordance "
+                      f"before validate-flags"]
     ep_path = work / "episodes.json"
     if not errors and ep_path.exists():
         episodes = _load_checked(ep_path, expect=list)
@@ -416,6 +461,12 @@ def cmd_validate_flags(args) -> int:
         for e in errors:
             print(f"  {e}")
         return 1
+    # Provenance for an ACCEPTED flag set, so render can refuse to record a
+    # different codebook than the one these flags were validated against.
+    # Written last, and only on success: a record from a rejected run would
+    # have render cross-check against a codebook that validated nothing.
+    _save(work / CODEBOOK_REF, {"codebook_file": codebook_path.name,
+                                "codebook_version": codebook["codebook_version"]})
     print(f"OK: {len(flags)} flags valid against codebook {codebook['codebook_version']} "
           f"({codebook_path.name})")
     return 0
@@ -472,6 +523,28 @@ def cmd_render(args) -> int:
     audit = _load(work / "audit_log.json")
     diffed = _load(work / "diff.json")
     codebook_path, codebook = _load_codebook(args)
+    # render resolves --codebook independently of validate-flags, so omitting
+    # the flag on a moral-identity run used to write codebook_file:
+    # "codebook.json" into a sidecar full of moral-identity markers — the
+    # research record claiming the wrong construct, at exit 0. Cross-check
+    # against what validate-flags recorded, and refuse when they disagree.
+    #
+    # Permissive when nothing is recorded: work dirs produced before this
+    # record existed must keep rendering. Exit 1, like render's other
+    # fail-closed guards below — the invocation is well-formed, the pipeline
+    # state is not.
+    ref_path = work / CODEBOOK_REF
+    if ref_path.exists():
+        ref = _load_checked(ref_path, expect=dict)
+        used = (ref.get("codebook_file"), ref.get("codebook_version"))
+        here = (codebook_path.name, codebook["codebook_version"])
+        if used != here:
+            print(f"ERROR: codebook mismatch — validate-flags accepted these "
+                  f"flags against {used[0]} ({used[1]}), but render resolved "
+                  f"{here[0]} ({here[1]}). Re-run render with --codebook "
+                  f"pointing at {used[0]}, or re-run validate-flags with the "
+                  f"codebook you mean and then render again.", file=sys.stderr)
+            return 1
     # The episode layer is optional (the narrative pipeline predates it), but
     # when it exists it is part of the research record, not a staging artifact.
     ep_path = work / "episodes.json"
