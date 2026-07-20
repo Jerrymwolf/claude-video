@@ -97,3 +97,78 @@ class TestMoralCodebookInvariants:
             # the affect requirement.
             assert "requires_affect" in m, m["id"]
             assert isinstance(m["requires_affect"], bool), m["id"]
+
+
+MINI_MORAL = {
+    "codebook_version": "1.0.0",
+    "coding_scope": ["INTERVIEWEE", "INTERVIEWER"],
+    "affect_field": "affect",
+    "affect_vocabulary": ["anger", "shame", "neutral"],
+    "enforce_attribution_gate": False,
+    "markers": [
+        {"id": "attribution_of_blame", "definition": "x", "indicators": ["y"], "requires_affect": True},
+        {"id": "audience_address", "definition": "x", "indicators": ["y"], "requires_affect": False},
+    ],
+    "flag_schema": {"required": ["id", "marker_types", "quote", "t_start", "t_end",
+                                 "salience", "speaker_role"],
+                    "optional": ["affect", "attribution_uncertain", "episode_id"]},
+}
+
+TURNS = [
+    {"id": "m0001", "start": 0.0, "end": 4.0, "text": "Why is this cart here?",
+     "label": "INTERVIEWER", "concordance": 1.0, "segment_indices": [0]},
+    {"id": "m0002", "start": 5.0, "end": 9.0, "text": "Don't touch my property.",
+     "label": "INTERVIEWEE", "concordance": 1.0, "segment_indices": [1]},
+]
+
+
+def moral_flag(**over):
+    base = {"id": "g0001", "marker_types": ["attribution_of_blame"],
+            "quote": "Don't touch my property.", "t_start": 5.0, "t_end": 9.0,
+            "salience": 3, "speaker_role": "INTERVIEWEE", "affect": "anger"}
+    base.update(over)
+    return base
+
+
+class TestCodebookDrivenValidation:
+    def test_valid_moral_flag_passes(self):
+        assert validate_flags([moral_flag()], MINI_MORAL, 100.0, turns=TURNS) == []
+
+    def test_affect_field_and_vocabulary_enforced(self):
+        errs = validate_flags([moral_flag(affect="smug")], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("'smug' not in codebook vocabulary" in e for e in errs)
+        errs = validate_flags([moral_flag(affect=None)], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("requires an affect" in e for e in errs)
+
+    def test_marker_without_requires_affect_allows_missing_affect(self):
+        f = moral_flag(marker_types=["audience_address"], affect=None,
+                       quote="Why is this cart here?", t_start=0.0, t_end=4.0,
+                       speaker_role="INTERVIEWER")
+        assert validate_flags([f], MINI_MORAL, 100.0, turns=TURNS) == []
+
+    def test_speaker_role_outside_scope_rejected(self):
+        cb = dict(MINI_MORAL, coding_scope=["INTERVIEWEE"])
+        f = moral_flag(speaker_role="INTERVIEWER", quote="Why is this cart here?",
+                       t_start=0.0, t_end=4.0)
+        errs = validate_flags([f], cb, 100.0, turns=TURNS)
+        assert any("speaker_role 'INTERVIEWER' not in coding scope" in e for e in errs)
+
+    def test_quote_must_lie_in_turn_with_matching_label(self):
+        f = moral_flag(speaker_role="INTERVIEWER")  # quote is an INTERVIEWEE line
+        errs = validate_flags([f], MINI_MORAL, 100.0, turns=TURNS)
+        assert any("no INTERVIEWER turn near" in e for e in errs)
+
+    def test_old_codebook_behavior_unchanged(self):
+        old = {"codebook_version": "1.0.0",
+               "emotions": ["anger"],
+               "markers": [{"id": "emotional_display", "definition": "x",
+                            "indicators": ["y"], "requires_emotion": True}],
+               "flag_schema": {"required": ["id", "marker_types", "quote",
+                                            "t_start", "t_end", "salience"]}}
+        f = {"id": "g0001", "marker_types": ["emotional_display"],
+             "quote": "Don't touch my property.", "t_start": 5.0, "t_end": 9.0,
+             "salience": 3, "emotion": "anger"}
+        assert validate_flags([f], old, 100.0, turns=TURNS) == []
+        f2 = dict(f, emotion=None)
+        errs = validate_flags([f2], old, 100.0, turns=TURNS)
+        assert any("requires an emotion" in e for e in errs)

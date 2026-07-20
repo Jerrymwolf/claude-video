@@ -132,21 +132,55 @@ def compute_concordance(turns: list[dict], panels: list[dict]) -> dict:
     return result
 
 
+def _find_quote_turn(flag: dict, turns: list[dict], label: str | None = None) -> dict | None:
+    """First turn containing the flag's quote, optionally restricted to a label,
+    whose span overlaps the flag's [t_start-2, t_end+2] window (mirrors the
+    docx anchor slop). Falls back to text-only match when timestamps are absent."""
+    quote = flag.get("quote") or ""
+    if not quote:
+        return None
+    t0, t1 = flag.get("t_start"), flag.get("t_end")
+    timed = isinstance(t0, (int, float)) and isinstance(t1, (int, float))
+    for turn in turns:
+        if label is not None and turn.get("label") != label:
+            continue
+        if quote not in turn["text"]:
+            continue
+        if not timed or (t0 <= turn["end"] + 2.0 and t1 >= turn["start"] - 2.0):
+            return turn
+    return None
+
+
 def validate_flags(
     flags: list[dict],
     codebook: dict,
     duration: float,
     transcript_text: str | None = None,
+    turns: list[dict] | None = None,
 ) -> list[str]:
     """Return a list of human-readable schema violations (empty = valid).
 
     When `transcript_text` is provided, every quote must be a verbatim
     substring of it — paraphrased quotes are research-record corruption.
+
+    Codebook-declared behavior (defaults preserve the shipped narrative-gravity
+    codebook exactly): `affect_field` names the affect key ("emotion" default);
+    `affect_vocabulary` (fallback: `emotions`) is its vocabulary; markers with
+    `requires_affect`/`requires_emotion` demand it; `coding_scope` (default
+    ["INTERVIEWEE"]) gates `speaker_role` when the schema requires that field;
+    `enforce_attribution_gate` demands `attribution_uncertain: true` on flags
+    whose quoted turn has concordance < 1.0 or label UNCLEAR (needs `turns`).
     """
     errors: list[str] = []
     marker_ids = {m["id"] for m in codebook["markers"]}
-    emotions = set(codebook["emotions"])
+    affect_field = codebook.get("affect_field", "emotion")
+    vocab = set(codebook.get("affect_vocabulary") or codebook.get("emotions") or [])
+    requiring = {m["id"] for m in codebook["markers"]
+                 if m.get("requires_affect") or m.get("requires_emotion")}
     required = codebook["flag_schema"]["required"]
+    scope = set(codebook.get("coding_scope", ["INTERVIEWEE"]))
+    check_role = "speaker_role" in required
+    gate = bool(codebook.get("enforce_attribution_gate"))
 
     for i, flag in enumerate(flags):
         ref = flag.get("id", f"flags[{i}]")
@@ -165,12 +199,27 @@ def validate_flags(
         for m in markers:
             if m not in marker_ids:
                 errors.append(f"{ref}: unknown marker '{m}'")
-        if "emotional_display" in markers:
-            emotion = flag.get("emotion")
-            if not emotion:
-                errors.append(f"{ref}: emotional_display requires an emotion")
-            elif emotion not in emotions:
-                errors.append(f"{ref}: emotion '{emotion}' not in codebook vocabulary")
+        if any(m in requiring for m in markers):
+            value = flag.get(affect_field)
+            if not value:
+                errors.append(f"{ref}: marker requires an {affect_field}")
+            elif value not in vocab:
+                errors.append(f"{ref}: {affect_field} '{value}' not in codebook vocabulary")
+        role = flag.get("speaker_role")
+        if check_role and role:
+            if role not in scope:
+                errors.append(f"{ref}: speaker_role '{role}' not in coding scope {sorted(scope)}")
+            elif turns is not None and quote and _find_quote_turn(flag, turns, label=role) is None:
+                errors.append(f"{ref}: no {role} turn near [{flag.get('t_start')}, "
+                              f"{flag.get('t_end')}] contains the quote")
+        if gate and turns is not None and quote:
+            home = _find_quote_turn(flag, turns)
+            if home is not None and (home.get("label") == "UNCLEAR"
+                                     or float(home.get("concordance", 1.0)) < 1.0):
+                if flag.get("attribution_uncertain") is not True:
+                    errors.append(f"{ref}: quoted turn {home['id']} has concordance "
+                                  f"{home.get('concordance')} — flag must set "
+                                  f"attribution_uncertain: true")
         salience = flag.get("salience")
         if not isinstance(salience, int) or isinstance(salience, bool) or not 1 <= salience <= 5:
             errors.append(f"{ref}: salience must be an integer 1-5 (got {salience!r})")
