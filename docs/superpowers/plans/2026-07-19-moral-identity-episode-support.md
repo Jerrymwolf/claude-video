@@ -587,12 +587,60 @@ class TestAttributionGate:
     def test_gate_off_means_no_requirement(self):
         f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
         assert validate_flags([f], MINI_MORAL, 100.0, turns=self.LOW_TURNS) == []
+
+    # --- AMENDED after Task 3 code review: the four tests above leave the
+    # UNCLEAR branch, the fail-closed preconditions, and the unresolvable-quote
+    # path unpinned. A reviewer mutated the gate to ignore the UNCLEAR label and
+    # the whole suite still passed. These close it. ---
+
+    UNCLEAR_TURNS = [
+        {"id": "m0001", "start": 5.0, "end": 9.0, "text": "Don't touch my property.",
+         "label": "UNCLEAR", "concordance": 1.0, "segment_indices": [0]},
+    ]
+    # speaker_role would fail on an UNCLEAR turn for an unrelated reason, so the
+    # gate is exercised through a schema that does not require speaker_role.
+    GATED_NO_ROLE = dict(
+        MINI_MORAL, enforce_attribution_gate=True,
+        coding_scope=None,
+        flag_schema={"required": ["id", "marker_types", "quote", "t_start",
+                                  "t_end", "salience"],
+                     "optional": ["affect", "attribution_uncertain"]},
+    )
+
+    def test_unclear_label_triggers_gate_even_at_full_concordance(self):
+        cb = {k: v for k, v in self.GATED_NO_ROLE.items() if v is not None}
+        f = {k: v for k, v in moral_flag().items() if k != "speaker_role"}
+        errs = validate_flags([f], cb, 100.0, turns=self.UNCLEAR_TURNS)
+        assert any("attribution_uncertain" in e for e in errs)
+        # the message must name the real trigger, not report "concordance 1.0"
+        assert any("UNCLEAR" in e for e in errs)
+
+    def test_gate_without_turns_raises_rather_than_silently_passing(self):
+        import pytest
+        f = moral_flag(quote="Or that 50 people over there?", t_start=0.0, t_end=4.0)
+        with pytest.raises(ValueError, match="turns"):
+            validate_flags([f], self.GATED, 100.0, turns=None)
+
+    def test_unlabeled_turns_raise(self):
+        import pytest
+        bare = [{"id": "m0001", "start": 0.0, "end": 4.0, "text": "Or that 50 people over there?"}]
+        with pytest.raises(ValueError, match="label/concordance"):
+            validate_flags([moral_flag()], self.GATED, 100.0, turns=bare)
+
+    def test_unlocatable_quote_is_a_finding_not_a_pass(self):
+        cb = {k: v for k, v in self.GATED_NO_ROLE.items() if v is not None}
+        f = {k: v for k, v in moral_flag(quote="words in no turn").items()
+             if k != "speaker_role"}
+        errs = validate_flags([f], cb, 100.0, turns=self.LOW_TURNS)
+        assert any("could not be located" in e for e in errs)
 ```
 
 - [ ] **Step 2: Run tests to verify they pass** (implementation landed in Task 3)
 
 Run: `python -m pytest tests/test_interview_moral_codebook.py -q`
-Expected: 17 passed. If any fail, fix `validate_flags` (not the tests) until green.
+Expected: all green. If any fail, fix `validate_flags` (not the tests) until green.
+
+**Before committing, mutation-check the gate.** Apply each mutation to `analyze.py`, run the suite, confirm it FAILS, then restore: (a) delete the UNCLEAR branch from the gate condition; (b) drop the `turns is None` precondition; (c) make an unresolvable quote (`home is None`) pass silently. A gate test that survives its own mutation is decoration.
 
 - [ ] **Step 3: Commit**
 
