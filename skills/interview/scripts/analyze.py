@@ -69,6 +69,15 @@ def merge_labeled_turns(turns: list[dict]) -> list[dict]:
     members — a turn is only as reliable as its weakest unit. UNCLEAR units
     never merge with each other: UNCLEAR means the panel could not assign a
     speaker, so adjacent UNCLEAR units may be different voices.
+
+    Episodes are a second hard barrier, parallel to the UNCLEAR rule: two units
+    carrying DIFFERENT `episode_id`s never merge even when their labels agree.
+    The videographer's turns either side of an episode boundary are the same
+    speaker but different confrontations, and a merged turn can carry only one
+    episode_id — fusing them would refile target B's exchange under target A,
+    the exact defect episodes exist to prevent. The barrier is inert when
+    `episode_id` is absent, so every pre-episode caller is unaffected. A merged
+    turn claims an episode_id only when EVERY member carried the same one.
     """
     missing = [t.get("id", "?") for t in turns
                if "label" not in t or "concordance" not in t]
@@ -77,15 +86,24 @@ def merge_labeled_turns(turns: list[dict]) -> list[dict]:
             f"units missing label/concordance (run concordance first): {', '.join(missing[:5])}"
         )
     merged: list[dict] = []
+    prev_ep = None
     for t in turns:
-        if merged and merged[-1]["label"] == t["label"] and t["label"] != "UNCLEAR":
+        ep = t.get("episode_id")
+        crosses = prev_ep is not None and ep is not None and ep != prev_ep
+        if (merged and merged[-1]["label"] == t["label"]
+                and t["label"] != "UNCLEAR" and not crosses):
             m = merged[-1]
             m["text"] = f"{m['text']} {t['text']}".strip()
             m["end"] = max(m["end"], float(t["end"]))
             m["concordance"] = min(m["concordance"], t["concordance"])
             m["segment_indices"].extend(t["segment_indices"])
+            # An unannotated member makes the claim unprovable — drop it rather
+            # than let one member's id speak for units that never carried one.
+            if ep is None or m.get("episode_id") != ep:
+                m.pop("episode_id", None)
+            prev_ep = ep
             continue
-        merged.append({
+        new = {
             "id": f"m{len(merged) + 1:04d}",
             "start": float(t["start"]),
             "end": float(t["end"]),
@@ -93,7 +111,11 @@ def merge_labeled_turns(turns: list[dict]) -> list[dict]:
             "label": t["label"],
             "concordance": float(t["concordance"]),
             "segment_indices": list(t["segment_indices"]),
-        })
+        }
+        if ep is not None:
+            new["episode_id"] = ep
+        merged.append(new)
+        prev_ep = ep
     return merged
 
 
@@ -338,8 +360,46 @@ def burst_timestamps(
 
 
 EPISODE_TYPES = {"confrontation", "commendation", "bystander", "to-camera"}
+EPISODE_REQUIRED = ("id", "type", "t_start", "t_end")
+EPISODE_CONFRONTATION_REQUIRED = ("target_descriptor", "target_speech")
 ARC_PHASES = {"threat", "defense", "escalation", "softening", "flip", "repair", "exit"}
 ARC_OUTCOMES = {"complies", "refuses", "escalates", "partial", "n/a"}
+MAX_LISTED = 5
+
+
+def _is_num(value: object) -> bool:
+    """A real number, excluding bool. `"t_start": false` must not read as 0.0
+    (mirrors the salience check in validate_flags)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _capped(items: list[str], label: str) -> list[str]:
+    """One summary line per problem class, listing at most MAX_LISTED examples.
+
+    episodes.json is LLM-authored: a single mistyped timestamp orphans EVERY
+    turn, and hundreds of identical lines bury the one cause under its effects.
+    Mirrors how validate_flags caps its unlabeled-turn list.
+    """
+    if not items:
+        return []
+    more = f" (+{len(items) - MAX_LISTED} more)" if len(items) > MAX_LISTED else ""
+    return [f"{len(items)} {label}: {', '.join(items[:MAX_LISTED])}{more}"]
+
+
+def _episode_required(codebook: dict | None) -> tuple[tuple, tuple]:
+    """Required episode fields, preferring the codebook's declaration.
+
+    Same contract as _episode_enums, and for the same reason: the file that
+    defines the construct declares which fields it demands, so adding one to
+    `episode_schema.required` actually enforces it instead of being silently
+    ignored by a second copy in Python. Mirrors validate_flags reading
+    `flag_schema.required`.
+    """
+    schema = (codebook or {}).get("episode_schema") or {}
+    return (
+        tuple(schema.get("required") or EPISODE_REQUIRED),
+        tuple(schema.get("confrontation_required") or EPISODE_CONFRONTATION_REQUIRED),
+    )
 
 
 def _episode_enums(codebook: dict | None) -> tuple[set, set, set]:
@@ -362,7 +422,7 @@ def _containing_episode(t: float, episodes: list[dict]) -> dict | None:
     so the recording's last turn is never orphaned."""
     for i, e in enumerate(episodes):
         t0, t1 = e.get("t_start"), e.get("t_end")
-        if not (isinstance(t0, (int, float)) and isinstance(t1, (int, float))):
+        if not (_is_num(t0) and _is_num(t1)):
             continue
         last = i == len(episodes) - 1
         if t0 <= t < t1 or (last and t == t1):
@@ -377,52 +437,98 @@ def validate_episodes(
 
     Episodes are ordered, non-overlapping time spans. Gaps BETWEEN episodes are
     legal (silent B-roll holds no turns); coverage is enforced over turns —
-    every turn's start must fall inside exactly one episode. Arc objects are
-    optional; when present their enums are checked (turning_point may be a
-    turn id or the literal "off-camera" — arcs can turn before the camera ran).
+    every turn's start must fall inside exactly one episode, and a turn whose
+    END lands in a different episode is reported as straddling: that is a
+    mis-drawn boundary, and authoring time is the only point at which the
+    researcher can still fix it. Arc objects are optional; when present their
+    enums are checked (turning_point may be a turn id or the literal
+    "off-camera" — arcs can turn before the camera ran).
+
+    Required fields and the episode/arc enums are read from the codebook
+    (`episode_schema`, `arc_schema`); the module constants are only the
+    fallback for codebooks that declare no episode schema.
     """
     errors: list[str] = []
     episode_types, arc_phases, arc_outcomes = _episode_enums(codebook)
+    required, confrontation_required = _episode_required(codebook)
     if not isinstance(episodes, list) or not episodes:
         return ["episodes.json must be a non-empty array"]
     ids = [e.get("id") for e in episodes]
     for dup in sorted({i for i in ids if i and ids.count(i) > 1}):
         errors.append(f"{dup}: duplicate episode id")
-    prev_end, prev_id = None, None
+    prev_start, prev_end, prev_id = None, None, None
     for i, e in enumerate(episodes):
         ref = e.get("id", f"episodes[{i}]")
-        for field in ("id", "type", "t_start", "t_end"):
+        for field in required:
             if e.get(field) in (None, ""):
                 errors.append(f"{ref}: missing required field '{field}'")
         etype = e.get("type")
         if etype and etype not in episode_types:
             errors.append(f"{ref}: unknown type '{etype}' (valid: {sorted(episode_types)})")
         t0, t1 = e.get("t_start"), e.get("t_end")
-        if isinstance(t0, (int, float)) and isinstance(t1, (int, float)):
+        # Timestamps are authored from a video clock, so "0:00"/"00:01:40" is a
+        # likely failure. Say so once, here — otherwise the only symptom is
+        # every turn reporting that it falls in no episode.
+        for field, value in (("t_start", t0), ("t_end", t1)):
+            if value not in (None, "") and not _is_num(value):
+                errors.append(f"{ref}: {field} must be a number (got {value!r})")
+        if _is_num(t0) and _is_num(t1):
             if t0 > t1:
                 errors.append(f"{ref}: t_start > t_end")
             if prev_end is not None and t0 < prev_end:
-                errors.append(f"{ref}: overlaps {prev_id} (starts at {t0} before its end {prev_end})")
-            prev_end, prev_id = t1, ref
+                if prev_start is not None and t1 <= prev_start:
+                    errors.append(f"{ref}: out of order — spans {t0}-{t1}, entirely before "
+                                  f"{prev_id} which starts at {prev_start}")
+                else:
+                    errors.append(f"{ref}: overlaps {prev_id} (starts at {t0} before its end {prev_end})")
+            prev_start, prev_end, prev_id = t0, t1, ref
         if etype == "confrontation":
-            if not str(e.get("target_descriptor") or "").strip():
-                errors.append(f"{ref}: confrontation requires a target_descriptor")
-            if not isinstance(e.get("target_speech"), bool):
-                errors.append(f"{ref}: target_speech must be true/false")
+            for field in confrontation_required:
+                if field == "target_speech":
+                    # a per-field TYPE rule: the target either spoke or did not
+                    if not isinstance(e.get(field), bool):
+                        errors.append(f"{ref}: target_speech must be true/false")
+                elif not str(e.get(field) or "").strip():
+                    errors.append(f"{ref}: confrontation requires a {field}")
         arc = e.get("arc")
         if arc is not None:
-            for ph in arc.get("phases", []):
-                if ph not in arc_phases:
-                    errors.append(f"{ref}: unknown arc phase '{ph}'")
-            outcome = arc.get("outcome")
-            if outcome is not None and outcome not in arc_outcomes:
-                errors.append(f"{ref}: unknown arc outcome '{outcome}'")
-            tp = arc.get("turning_point")
-            if tp is not None and not isinstance(tp, str):
-                errors.append(f"{ref}: turning_point must be a turn id, 'off-camera', or null")
+            if not isinstance(arc, dict):
+                errors.append(f"{ref}: arc must be an object (got {type(arc).__name__})")
+            else:
+                phases = arc.get("phases", [])
+                if not isinstance(phases, list):
+                    # a bare string would iterate as characters, reporting six
+                    # "unknown arc phase" errors for one mistyped "threat"
+                    errors.append(f"{ref}: arc.phases must be a list "
+                                  f"(got {type(phases).__name__})")
+                    phases = []
+                for ph in phases:
+                    if ph not in arc_phases:
+                        errors.append(f"{ref}: unknown arc phase '{ph}'")
+                outcome = arc.get("outcome")
+                if outcome is not None and outcome not in arc_outcomes:
+                    errors.append(f"{ref}: unknown arc outcome '{outcome}'")
+                tp = arc.get("turning_point")
+                if tp is not None and not isinstance(tp, str):
+                    errors.append(f"{ref}: turning_point must be a turn id, 'off-camera', or null")
+    orphans: list[str] = []
+    straddlers: list[str] = []
     for t in turns:
-        if _containing_episode(float(t["start"]), episodes) is None:
-            errors.append(f"{t.get('id', '?')}: start {t['start']} falls in no episode")
+        tid = t.get("id", "?")
+        start, end = t.get("start"), t.get("end")
+        if not _is_num(start):
+            errors.append(f"{tid}: start must be a number (got {start!r})")
+            continue
+        home = _containing_episode(float(start), episodes)
+        if home is None:
+            orphans.append(f"{tid} (start {start})")
+            continue
+        if _is_num(end):
+            tail = _containing_episode(float(end), episodes)
+            if tail is not None and tail is not home:
+                straddlers.append(f"{tid} ({home.get('id')} → {tail.get('id')})")
+    errors.extend(_capped(orphans, "turn(s) fall in no episode"))
+    errors.extend(_capped(straddlers, "turn(s) straddle an episode boundary"))
     return errors
 
 
@@ -439,13 +545,35 @@ def assign_episode_ids(turns: list[dict], episodes: list[dict]) -> list[dict]:
 
 def assign_flag_episodes(flags: list[dict], episodes: list[dict]) -> list[str]:
     """Stamp episode_id onto each flag by t_start containment (in place).
+
     Returns errors for flags outside every episode instead of raising — flag
-    placement is a judgment product and its errors go back to the coder."""
+    placement is a judgment product and its errors go back to the coder. Every
+    flag is annotated either way: an unplaceable flag gets an explicit
+    `episode_id: None`, because the list is mutated before the caller sees the
+    errors and a caller that persists on the error path must not write a record
+    where a missing key is indistinguishable from an unassigned one.
+
+    A flag whose t_end lands in a different episode is reported as straddling
+    and filed under its t_start's episode — a boundary drawn through a flag is
+    a research-record problem, not something to resolve silently.
+    """
     errors: list[str] = []
     for f in flags:
-        home = _containing_episode(float(f.get("t_start", -1)), episodes)
+        ref = f.get("id", "?")
+        t_start, t_end = f.get("t_start"), f.get("t_end")
+        if not _is_num(t_start):
+            f["episode_id"] = None
+            errors.append(f"{ref}: t_start must be a number (got {t_start!r})")
+            continue
+        home = _containing_episode(float(t_start), episodes)
         if home is None:
-            errors.append(f"{f.get('id', '?')}: t_start {f.get('t_start')} outside every episode")
-        else:
-            f["episode_id"] = home["id"]
+            f["episode_id"] = None
+            errors.append(f"{ref}: t_start {t_start} outside every episode")
+            continue
+        f["episode_id"] = home["id"]
+        if _is_num(t_end):
+            tail = _containing_episode(float(t_end), episodes)
+            if tail is not None and tail is not home:
+                errors.append(f"{ref}: straddles episodes {home['id']} → {tail['id']} "
+                              f"(t_start {t_start}, t_end {t_end}); filed under {home['id']}")
     return errors
