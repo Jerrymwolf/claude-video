@@ -667,18 +667,52 @@ def sidecar_codebook(sidecar: dict) -> str:
     return "codebook.json" if sidecar.get("schema_version", "1.0") == "1.0" else "unknown"
 
 
+def _corpus_bucket() -> dict:
+    """The per-codebook counters `by_codebook` disaggregates the corpus into."""
+    return {"flags_by_marker": Counter(), "flags_by_affect": Counter(),
+            "episode_outcomes": Counter()}
+
+
 def summarize_corpus(sidecars: list[dict]) -> dict:
     """Aggregate per-interview sidecars into corpus counts.
 
     Works on both sidecar generations: pre-episode sidecars contribute marker
     and affect counts only (`emotion` is read as the affect fallback); episode
-    sidecars additionally feed outcome counts and the marker x outcome
-    cross-tab (keys "marker|outcome"), which counts only flags inside episodes
-    carrying an arc outcome.
+    sidecars additionally feed `episode_outcomes` and the marker x outcome
+    cross-tab `marker_by_outcome` (keys "marker|outcome").
+
+    ONE scope governs both outcome tables, and `ep_outcome` below is its single
+    definition: a CONFRONTATION episode carrying an arc outcome. The scope is
+    confrontation-shaped because the vocabulary is — `arc_schema.outcomes` is
+    complies/refuses/escalates/partial/n-a, answers to "how did the
+    confrontation end". A to-camera episode's "n/a" run through the cross-tab
+    would raise a `marker|n/a` column that reads as a real outcome and means
+    nothing: the same class of error as summing two codebooks' markers. Nothing
+    is lost — flags in non-confrontation episodes still reach `flags_by_marker`.
+    `confrontations_with_outcome` is that shared denominator, published so the
+    two tables reconcile arithmetically (it equals the sum of
+    `episode_outcomes`) instead of on the strength of this docstring: the
+    artifact travels alone.
 
     Marker vocabularies are codebook-specific, so a corpus spanning more than
-    one codebook sets `mixed_constructs` — the flat counts are then a sum over
-    incompatible vocabularies and must not be read as one distribution.
+    one codebook sets `mixed_constructs`, states the problem in `warnings`, and
+    publishes the disaggregated truth in `by_codebook`. The flat tables are
+    still emitted — pre-episode consumers read them — but when mixed they are a
+    retained rollup over incompatible vocabularies, not one distribution.
+
+    Two properties of the flat tables worth knowing when reading them:
+
+    - `marker_by_outcome` joins on "|", unescaped, so a codebook whose marker
+      ids contain "|" would produce ambiguous keys. No shipped codebook does.
+    - duplicate episode ids collapse last-wins, in BOTH outcome tables now that
+      one map feeds them. `validate_episodes` rejects duplicates at authoring
+      time; this function reads sidecars off disk, where nothing re-checks.
+
+    Every field is read defensively. This is a pure function with no caller to
+    assume — its own tests import it directly, and `cmd_corpus_summary`'s
+    pre-filter checks key PRESENCE, not shape. A hand-edited or foreign sidecar
+    must degrade to zero counts, never take down a corpus summary that runs
+    once at the end of a long batch.
     """
     by_marker: Counter = Counter()
     by_affect: Counter = Counter()
@@ -686,38 +720,94 @@ def summarize_corpus(sidecars: list[dict]) -> dict:
     cross: Counter = Counter()
     personas: list[str] = []
     codebooks: Counter = Counter()
+    per_codebook: dict[str, dict] = {}
     rows: list[dict] = []
     for sc in sidecars:
-        flags = sc.get("flags", [])
-        episodes = sc.get("episodes", [])
+        if not isinstance(sc, dict):
+            continue
+        interview = sc.get("interview")
+        interview = interview if isinstance(interview, dict) else {}
+        raw_flags = sc.get("flags")
+        flags = ([f for f in raw_flags if isinstance(f, dict)]
+                 if isinstance(raw_flags, list) else [])
+        raw_episodes = sc.get("episodes")
+        episodes = raw_episodes if isinstance(raw_episodes, list) else []
         codebook = sidecar_codebook(sc)
         codebooks[codebook] += 1
+        bucket = per_codebook.setdefault(codebook, _corpus_bucket())
         ep_outcome = {e["id"]: (e.get("arc") or {}).get("outcome")
-                      for e in episodes if isinstance(e, dict) and e.get("id")}
+                      for e in episodes
+                      if isinstance(e, dict) and e.get("id")
+                      and e.get("type") == "confrontation"}
         for f in flags:
-            for m in f.get("marker_types", []):
+            markers = f.get("marker_types")
+            # A bare string iterates as CHARACTERS: "abc" would invent markers
+            # a, b and c and report them as findings. Same hazard, and the same
+            # guard, as arc.phases in validate_episodes.
+            markers = markers if isinstance(markers, list) else []
+            for m in markers:
                 by_marker[m] += 1
+                bucket["flags_by_marker"][m] += 1
             affect = f.get("affect") or f.get("emotion")
             if affect:
                 by_affect[affect] += 1
+                bucket["flags_by_affect"][affect] += 1
             outcome = ep_outcome.get(f.get("episode_id"))
             if outcome:
-                for m in f.get("marker_types", []):
+                for m in markers:
                     cross[f"{m}|{outcome}"] += 1
-        for e in episodes:
-            if isinstance(e, dict) and e.get("type") == "confrontation":
-                oc = (e.get("arc") or {}).get("outcome")
-                if oc:
-                    outcomes[oc] += 1
-        persona = sc.get("interview", {}).get("persona")
+        for oc in ep_outcome.values():
+            if oc:
+                outcomes[oc] += 1
+                bucket["episode_outcomes"][oc] += 1
+        persona = interview.get("persona") or None
         if persona:
             personas.append(persona)
-        rows.append({"media": sc["interview"]["media"], "flags": len(flags),
+        rows.append({"media": interview.get("media"), "flags": len(flags),
                      "episodes": len(episodes), "codebook": codebook,
-                     "claim": sc["accuracy_claim"]})
+                     # The authoritative persona binding. The flat `personas`
+                     # list is COMPACTED — an interview without a persona
+                     # contributes no entry — so its positions do not line up
+                     # with per_interview and it cannot be zipped against them.
+                     "persona": persona,
+                     "claim": sc.get("accuracy_claim")})
     return {"interviews": len(rows), "per_interview": rows,
             "codebooks": dict(codebooks),
             "mixed_constructs": len(codebooks) > 1,
+            "warnings": _corpus_warnings(codebooks),
+            "by_codebook": {cb: {name: dict(counts) for name, counts in b.items()}
+                            for cb, b in per_codebook.items()},
             "flags_by_marker": dict(by_marker), "flags_by_affect": dict(by_affect),
-            "episode_outcomes": dict(outcomes), "marker_by_outcome": dict(cross),
+            "episode_outcomes": dict(outcomes),
+            "confrontations_with_outcome": sum(outcomes.values()),
+            "marker_by_outcome": dict(cross),
             "personas": personas}
+
+
+def _corpus_warnings(codebooks: Counter) -> list[str]:
+    """Construct-validity warnings for a corpus, as text.
+
+    Built here rather than at the CLI so the line printed to stderr and the
+    line persisted in `warnings` cannot drift apart: corpus_summary.json
+    outlives the terminal session, and a consumer opening the file is the one
+    who most needs to be told the flat tables span two vocabularies.
+
+    Two findings, not one. "codebook.json + codebook_moral_identity.json" is
+    two incompatible vocabularies summed together. "codebook.json + unknown" is
+    one known vocabulary plus sidecars that recorded no provenance — possibly
+    the same codebook, unprovably so. Both are reported; conflating their
+    wording would overstate the second.
+    """
+    if len(codebooks) <= 1:
+        return []
+    names = ", ".join(sorted(codebooks))
+    known = sorted(k for k in codebooks if k != "unknown")
+    repair = "read by_codebook or per_interview[].codebook instead."
+    if len(known) > 1:
+        return [f"this corpus spans more than one codebook ({names}). Marker "
+                "vocabularies differ between codebooks, so flags_by_marker and "
+                f"marker_by_outcome sum incompatible constructs — {repair}"]
+    return [f"this corpus mixes recorded and unrecorded codebook provenance "
+            f"({names}). Sidecars resolving to 'unknown' record no "
+            f"codebook_file, so their markers cannot be confirmed to share "
+            f"{known[0]}'s vocabulary — {repair}"]

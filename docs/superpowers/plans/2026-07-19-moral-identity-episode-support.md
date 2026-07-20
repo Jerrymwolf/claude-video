@@ -1263,9 +1263,15 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `skills/interview/scripts/analyze.py` (append `summarize_corpus`)
 - Modify: `skills/interview/scripts/interview.py` (`cmd_corpus_summary` refactor)
-- Test: `tests/test_interview_episodes.py` (append)
+- Test: `tests/test_interview_corpus.py` (new file — see the deviation below)
 
 > **Deliberate spec deviation:** the spec listed `--codebook` on corpus-summary, but aggregation turned out fully codebook-agnostic — it counts whatever the sidecars contain. An argument that is accepted and ignored would mislead, so corpus-summary takes no `--codebook`. Recorded here as the spec deviation.
+
+> **Deviation (test location):** the tests landed in a NEW `tests/test_interview_corpus.py` rather than appended to `tests/test_interview_episodes.py`. Corpus aggregation is a distinct surface from episode validation — it reads finished sidecars, not work-dir judgment files — and `test_interview_episodes.py` was already 443 lines. Recorded here rather than left silent.
+
+> **Correction (2026-07-20, applied during Task 8 review): the outcome scope below is WRONG, in a way worth keeping visible.** The Step 3 code uses two different definitions of "an episode with an outcome": `ep_outcome` (feeding the cross-tab) accepts ANY episode, while the `outcomes` loop accepts only confrontations. A to-camera episode carrying `"n/a"` therefore raises a `marker|n/a` cross-tab column that reads as a real outcome column and means nothing — the same class of error as summing two codebooks' markers into one table. The shipped implementation narrows BOTH tables to confrontations and derives them from ONE map, because the outcome vocabulary is confrontation-shaped (`arc_schema.outcomes` is complies/refuses/escalates/partial/n-a, answers to "how did the confrontation end"). Nothing is lost: flags in non-confrontation episodes still reach `flags_by_marker`. It also publishes `confrontations_with_outcome` — the shared denominator — so the two tables reconcile arithmetically inside the artifact, which travels alone.
+>
+> The shipped implementation additionally adds, beyond this plan: `codebooks`, `mixed_constructs`, `by_codebook`, a persisted `warnings` array, and per-row `codebook` and `persona`. The construct-validity keys exist because merging `flags_by_marker` across codebooks with no codebook key anywhere in the output yields one authoritative-looking count table spanning two vocabularies. Per-row `persona` exists because the flat `personas` list is compacted and therefore cannot be zipped against `per_interview`. Every field below is also read defensively — this is a pure function with no caller to assume, and `cmd_corpus_summary`'s pre-filter checks key presence, not shape.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1349,6 +1355,10 @@ def summarize_corpus(sidecars: list[dict]) -> dict:
     for sc in sidecars:
         flags = sc.get("flags", [])
         episodes = sc.get("episodes", [])
+        # WRONG — see the correction above. This admits every episode type,
+        # while the `outcomes` loop below admits only confrontations: two
+        # definitions of one scope. Shipped code narrows this to
+        # `and e.get("type") == "confrontation"` and derives BOTH tables here.
         ep_outcome = {e["id"]: (e.get("arc") or {}).get("outcome")
                       for e in episodes if e.get("id")}
         for f in flags:

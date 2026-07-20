@@ -571,14 +571,13 @@ def cmd_corpus_summary(args) -> int:
             continue
         sidecars.append(sc)
     summary = summarize_corpus(sidecars)
-    # Back-compat alias: pre-episode consumers read flags_by_emotion.
-    summary["flags_by_emotion"] = summary["flags_by_affect"]
-    if summary["mixed_constructs"]:
-        print("WARNING: this corpus spans more than one codebook "
-              f"({', '.join(sorted(summary['codebooks']))}). Marker vocabularies "
-              "differ between codebooks, so flags_by_marker and marker_by_outcome "
-              "sum incompatible constructs — read per_interview[].codebook instead.",
-              file=sys.stderr)
+    # Back-compat alias: pre-episode consumers read flags_by_emotion. A COPY —
+    # two keys of a persisted artifact must not be one mutable object.
+    summary["flags_by_emotion"] = dict(summary["flags_by_affect"])
+    # Same text as the persisted `warnings`, by construction rather than by a
+    # second copy of the sentence — the file outlives this terminal session.
+    for warning in summary["warnings"]:
+        print(f"WARNING: {warning}", file=sys.stderr)
     _save(folder / "corpus_summary.json", summary)
     print(json.dumps(summary, indent=2))
     return 0
