@@ -265,7 +265,7 @@ class TestSidecar:
 
     def test_schema_shape(self):
         sc = self._sidecar()
-        assert sc["schema_version"] == "1.0"
+        assert sc["schema_version"] == "1.1"
         assert sc["interview"]["media"] == "bei_017.mp4"
         assert sc["interview"]["processed_at"] == "2026-07-10T12:00:00"
         assert sc["accuracy_claim"] == "dual-engine verified with logged adjudication"
@@ -314,3 +314,54 @@ class TestSidecar:
 
     def test_speaker_names_absent_by_default(self):
         assert "speaker_names" not in self._sidecar()
+
+    def test_episodes_persona_and_codebook_identity_recorded(self):
+        eps = [{"id": "e01", "type": "confrontation", "t_start": 0.0, "t_end": 30.0,
+                "target_descriptor": "woman", "target_speech": True,
+                "arc": {"phases": ["threat", "defense"], "outcome": "refuses",
+                        "turning_point": None}}]
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=TURNS, adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+            episodes=eps, persona="Agent Greg Gorey",
+            codebook_file="codebook_moral_identity.json",
+        )
+        assert sc["schema_version"] == "1.1"
+        assert sc["codebook_version"] == "1.0.0"
+        assert sc["episodes"][0]["arc"]["outcome"] == "refuses"
+        assert sc["interview"]["persona"] == "Agent Greg Gorey"
+        assert sc["codebook_file"] == "codebook_moral_identity.json"
+        # deep-copied — mutating the sidecar must not touch the caller's episodes
+        sc["episodes"][0]["arc"]["phases"].append("exit")
+        assert eps[0]["arc"]["phases"] == ["threat", "defense"]
+
+    def test_episode_fields_absent_by_default(self):
+        sc = self._sidecar()
+        assert "episodes" not in sc
+        assert "persona" not in sc["interview"]
+        assert "codebook_file" not in sc
+
+    def test_codebook_version_recorded_at_top_level_on_the_shipped_path(self):
+        # identity belongs to the record, not only to each flag: a sidecar whose
+        # flags list is empty must still say which codebook produced it
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=TURNS, adjudications=[], flags=[],
+            partial_failures=[], codebook_version="2.5.1", now="2026-07-10T12:00:00",
+        )
+        assert sc["codebook_version"] == "2.5.1"
+
+    def test_empty_episode_list_is_recorded_not_dropped(self):
+        # `episodes is not None`, not truthiness: "the episode pass ran and found
+        # nothing" is a different research claim from "no episode pass ran"
+        sc = build_sidecar(
+            media="x.mp4", duration=10.0,
+            engines={"groq": "whisper-large-v3", "openai": "whisper-1"},
+            degradation=[], segments=[], turns=TURNS, adjudications=[], flags=[],
+            partial_failures=[], codebook_version="1.0.0", now="2026-07-10T12:00:00",
+            episodes=[],
+        )
+        assert sc["episodes"] == []

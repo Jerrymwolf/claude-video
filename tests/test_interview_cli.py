@@ -1,5 +1,6 @@
-"""CLI stage wiring: validate-episodes, and validate-flags' --codebook /
-turn-passing / flag-episode stamping / turn-flag drift detection."""
+"""CLI stage wiring: validate-episodes, validate-flags' --codebook /
+turn-passing / flag-episode stamping / turn-flag drift detection, and render's
+--codebook / --persona / episodes.json → sidecar recording."""
 from __future__ import annotations
 
 import json
@@ -401,3 +402,146 @@ class TestShippedCodebookEndToEnd:
         work = make_work(tmp_path, turns=TURNS, flags=[bad])
         assert interview.cmd_validate_flags(flag_args(work)) == 1
         assert "INVALID FLAGS" in capsys.readouterr().out
+
+
+ARC_EPISODES = [
+    dict(EPISODES[0], arc={"phases": ["approach", "threat", "defense"],
+                           "outcome": "refuses", "turning_point": "t0002"}),
+    dict(EPISODES[1], arc={"phases": ["monologue"], "outcome": "none",
+                           "turning_point": None}),
+]
+
+
+def make_render_dirs(tmp_path, *, turns=TURNS, flags=NARRATIVE_FLAGS, episodes=None):
+    """A complete render input set. The media file is deliberately NOT created:
+    ffprobe fails on it, cmd_render catches that and derives duration from the
+    last segment — so these stay pure-stdlib, ffmpeg-free CLI tests."""
+    media = tmp_path / "bei_017.mp4"
+    base = tmp_path / "out"
+    work = base / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    files = {
+        "diarized.json": turns,
+        "flags.json": flags,
+        "final_transcript.json": [
+            {"start": t["start"], "end": t["end"], "text": t["text"]} for t in turns],
+        "audit_log.json": [],
+        "diff.json": {"degradation": [], "partial_failures": [],
+                      "engines": {"groq": "whisper-large-v3", "openai": "whisper-1"}},
+    }
+    if episodes is not None:
+        files["episodes.json"] = episodes
+    for name, data in files.items():
+        (work / name).write_text(json.dumps(data), encoding="utf-8")
+    return media, base
+
+
+def render_args(media, base, *extra):
+    """Through the real parser, like args_for — render takes a positional media
+    and --out-dir rather than --work."""
+    return interview.build_parser().parse_args(
+        ["render", str(media), "--out-dir", str(base), *extra])
+
+
+def sidecar_of(base):
+    return json.loads((base / "sidecar.json").read_text(encoding="utf-8"))
+
+
+class TestCmdRenderSidecar:
+    """Schema 1.1: the sidecar records the episode layer, the persona, and which
+    codebook produced it."""
+
+    def test_persona_lands_in_the_interview_block(self, tmp_path):
+        media, base = make_render_dirs(tmp_path)
+        assert interview.cmd_render(
+            render_args(media, base, "--persona", "Agent Greg Gorey")) == 0
+        sc = sidecar_of(base)
+        assert sc["interview"]["persona"] == "Agent Greg Gorey"
+        # persona is per-video metadata, never a role: the turn labels stand
+        assert {t["label"] for t in sc["turns"]} == {"INTERVIEWER", "INTERVIEWEE"}
+
+    def test_codebook_flag_records_the_file_name(self, tmp_path):
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS)
+        assert interview.cmd_render(
+            render_args(media, base, "--codebook", str(MORAL_CODEBOOK))) == 0
+        # both codebooks are version 1.0.0 — the FILE is what disambiguates them
+        assert sidecar_of(base)["codebook_file"] == "codebook_moral_identity.json"
+
+    def test_codebook_flag_selects_the_recorded_version(self, tmp_path):
+        cb = tmp_path / "other.json"
+        cb.write_text(json.dumps({"codebook_version": "9.9.9"}), encoding="utf-8")
+        media, base = make_render_dirs(tmp_path)
+        assert interview.cmd_render(render_args(media, base, "--codebook", str(cb))) == 0
+        sc = sidecar_of(base)
+        assert sc["codebook_version"] == "9.9.9"      # top level
+        assert sc["flags"][0]["codebook_version"] == "9.9.9"   # and per flag
+
+    def test_codebook_path_typo_exits_2(self, tmp_path, capsys):
+        # render loads the codebook through the checked loader, like the
+        # validate stages: a mistyped path is an input error, not a traceback
+        media, base = make_render_dirs(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            interview.cmd_render(render_args(media, base, "--codebook",
+                                             str(tmp_path / "nope.json")))
+        assert exc.value.code == 2
+        assert "nope.json" in capsys.readouterr().err
+
+    def test_episodes_json_reaches_the_sidecar_with_arcs(self, tmp_path):
+        media, base = make_render_dirs(tmp_path, episodes=ARC_EPISODES)
+        assert interview.cmd_render(render_args(media, base)) == 0
+        sc = sidecar_of(base)
+        assert [e["id"] for e in sc["episodes"]] == ["e01", "e02"]
+        assert sc["episodes"][0]["arc"]["outcome"] == "refuses"
+        assert sc["episodes"][0]["arc"]["phases"] == ["approach", "threat", "defense"]
+        assert sc["episodes"][0]["target_descriptor"] == "woman in the garage"
+
+    def test_empty_episodes_json_is_recorded_not_dropped(self, tmp_path):
+        # "the episode pass ran and drew nothing" is a different research claim
+        # from "no episode pass ran" — absence of the key means the latter
+        media, base = make_render_dirs(tmp_path, episodes=[])
+        assert interview.cmd_render(render_args(media, base)) == 0
+        assert sidecar_of(base)["episodes"] == []
+
+    def test_malformed_episodes_json_at_render_exits_2(self, tmp_path, capsys):
+        media, base = make_render_dirs(tmp_path)
+        (base / "work" / "episodes.json").write_text("[oops]", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            interview.cmd_render(render_args(media, base))
+        assert exc.value.code == 2
+        assert "episodes.json" in capsys.readouterr().err
+
+    def test_default_path_carries_only_the_version_bump(self, tmp_path):
+        # no --codebook, no --persona, no episodes.json: the shipped narrative
+        # sidecar gains codebook_version and nothing else
+        media, base = make_render_dirs(tmp_path)
+        assert interview.cmd_render(render_args(media, base)) == 0
+        sc = sidecar_of(base)
+        assert sc["schema_version"] == "1.1"
+        assert sc["codebook_version"] == "1.0.0"
+        assert "episodes" not in sc
+        assert "codebook_file" not in sc
+        assert "persona" not in sc["interview"]
+        assert "speaker_names" not in sc
+
+    def test_main_dispatches_render_with_persona_and_codebook(
+            self, tmp_path, monkeypatch):
+        # pins the render subparser's two new arguments through the real CLI
+        media, base = make_render_dirs(tmp_path, flags=MORAL_FLAGS,
+                                       episodes=ARC_EPISODES)
+        monkeypatch.setattr(sys, "argv", [
+            "interview.py", "render", str(media), "--out-dir", str(base),
+            "--codebook", str(MORAL_CODEBOOK), "--persona", "RoboNarc"])
+        assert interview.main() == 0
+        sc = sidecar_of(base)
+        assert sc["interview"]["persona"] == "RoboNarc"
+        assert sc["codebook_file"] == "codebook_moral_identity.json"
+        assert sc["episodes"][1]["arc"]["phases"] == ["monologue"]
+
+    def test_speaker_names_still_recorded_alongside_persona(self, tmp_path):
+        # the display-name layer must survive the new keyword arguments
+        media, base = make_render_dirs(tmp_path)
+        assert interview.cmd_render(render_args(
+            media, base, "--interviewee", "Participant", "--persona", "Agent Sebastian")) == 0
+        sc = sidecar_of(base)
+        assert sc["speaker_names"] == {"INTERVIEWEE": "Participant"}
+        assert sc["interview"]["persona"] == "Agent Sebastian"

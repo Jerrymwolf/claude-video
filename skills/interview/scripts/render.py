@@ -226,12 +226,19 @@ def build_sidecar(
     codebook_version: str,
     now: str | None = None,
     speaker_names: dict | None = None,
+    episodes: list[dict] | None = None,
+    persona: str | None = None,
+    codebook_file: str | None = None,
 ) -> dict:
     """Pure assembly of the machine-readable record. `now` injectable for tests.
 
     `speaker_names` (role label → display name) is recorded verbatim when
     non-empty so the artifact is self-describing, but `turns[].label` stays
-    canonical — the research record is role-based, names are a display layer."""
+    canonical — the research record is role-based, names are a display layer.
+
+    `episodes` (the validated episode list, arcs included), `persona` (the
+    confronter's per-video character), and `codebook_file` are recorded when
+    provided so the artifact is self-describing; schema_version 1.1 adds them."""
     dual = engines.get("groq") and engines.get("openai") and not any(
         ENGINE_SKIPPED in d or TRANSCRIPTION_FAILED in d for d in degradation
     )
@@ -243,7 +250,7 @@ def build_sidecar(
     else:
         claim = "dual-engine verified with logged adjudication"
     sidecar = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "interview": {
             "media": media,
             "duration_seconds": duration,
@@ -251,6 +258,7 @@ def build_sidecar(
         },
         "engines": engines,
         "accuracy_claim": claim,
+        "codebook_version": codebook_version,
         "degradation": degradation,
         "partial_failures": partial_failures,
         "segments": segments,
@@ -258,6 +266,12 @@ def build_sidecar(
         "adjudications": adjudications,
         "flags": [dict(copy.deepcopy(f), codebook_version=codebook_version) for f in flags],
     }
+    if persona:
+        sidecar["interview"]["persona"] = persona
+    if episodes is not None:
+        sidecar["episodes"] = copy.deepcopy(episodes)
+    if codebook_file:
+        sidecar["codebook_file"] = codebook_file
     if speaker_names:
         sidecar["speaker_names"] = dict(speaker_names)
     return sidecar

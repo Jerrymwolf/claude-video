@@ -450,7 +450,11 @@ def cmd_render(args) -> int:
     segments = _load(work / "final_transcript.json")
     audit = _load(work / "audit_log.json")
     diffed = _load(work / "diff.json")
-    codebook = _load(CODEBOOK_PATH)
+    codebook_path, codebook = _load_codebook(args)
+    # The episode layer is optional (the narrative pipeline predates it), but
+    # when it exists it is part of the research record, not a staging artifact.
+    ep_path = work / "episodes.json"
+    episodes = _load_checked(ep_path, expect=list) if ep_path.exists() else None
 
     try:
         meta = framegrab.get_metadata(str(media))
@@ -487,6 +491,11 @@ def cmd_render(args) -> int:
         partial_failures=partial,
         codebook_version=codebook["codebook_version"],
         speaker_names=names,
+        episodes=episodes,
+        persona=args.persona,
+        # Identity only when it is not the default: an absent key means the
+        # shipped codebook, which is what every pre-1.1 sidecar already meant.
+        codebook_file=codebook_path.name if codebook_path != CODEBOOK_PATH else None,
     )
     notes = degradation + (
         ["transcription gaps: " + "; ".join(partial)] if partial else []
@@ -561,6 +570,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interviewee", metavar="NAME", help="display name for INTERVIEWEE turns")
     p.add_argument("--other", metavar="NAME", help="display name for OTHER turns")
     p.add_argument("--unclear", metavar="NAME", help="display name for UNCLEAR turns")
+    p.add_argument("--codebook", metavar="PATH", help="alternate codebook file (default: shipped codebook.json)")
+    p.add_argument("--persona", metavar="NAME", help="the confronter's per-video persona, recorded in the sidecar")
     p = sub.add_parser("corpus-summary"); p.add_argument("folder")
     return parser
 
